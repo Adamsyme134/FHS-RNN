@@ -1,0 +1,25 @@
+seed: 42 #for random number generators (so initial weights etc always identical)
+
+task:
+  n_stimuli: 3
+  time_steps: 50
+  stimulus_onset: 10
+  stimulus_duration: 10
+  reward_time: 35
+  batch_size: 64
+
+model:
+  input_size: 3
+  hidden_size: 64
+  output_size: 1
+  rnn_type: "vanilla"
+
+training:
+  learning_rate: 0.001
+  n_epochs: 200
+  weight_decay: 0.0
+
+paths:
+  model_dir: "outputs/models"
+  result_dir: "outputs/results"
+  figure_dir: "outputs/figures"
