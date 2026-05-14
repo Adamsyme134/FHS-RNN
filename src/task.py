@@ -16,14 +16,16 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 
-def generate_trial():
+def generate_trial(cue_choice="r"):
     reward_probs = TASK["reward_probs"]
     stimulus_duration = TASK["stimulus_duration"]
     delay_duration = TASK["delay_duration"]
     reward_duration = TASK["reward_duration"]
 
-
-    cue = random.choice(["A", "B", "C"])
+    if cue_choice == "r":
+        cue = random.choice(["A", "B", "C"])
+    else:
+        cue = cue_choice.upper()
     cue_int = {'A': 0, 'B': 1, 'C': 2}[cue]
     expected_value = reward_probs[cue]
     rewarded = int(np.random.rand() < reward_probs[cue]) #decides if reqard will be given based on reqard probability

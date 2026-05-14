@@ -1,7 +1,13 @@
 from task import *
-
+from models import *
+from train import *
 import matplotlib.pyplot as plt
 import numpy as np
+
+lr = TRAINING["lr"]
+batch_size = TRAINING["batch_size"]
+epochs = TRAINING["epochs"]
+batches_per_epoch = TRAINING["batches_per_epoch"]
 
 
 def plot_task_batch():
@@ -44,5 +50,47 @@ def plot_task_batch():
     plt.show()
 
 def plot_predictions(rnn, batch_size = 5):
-    #Make fresh batch for testing
-    inputs, targets, lengths, mask = generate_batch(batch_size)
+    
+    with torch.no_grad(): #Do not track gradients 
+        #Make fresh batch for testing
+        inputs, targets, lengths, mask = generate_batch(batch_size)
+
+        ys, hs = rnn.forward(inputs)
+
+        #Convert to numpy for plotting 
+        ys_np = ys.detach().numpy()
+        targets_np = targets.detach().numpy()    
+    
+
+    fig, axes = plt.subplots(batch_size, 1, figsize=(10, 2 * batch_size), sharex=True)
+    for i in range(batch_size):
+        # Plot input matrix
+        axes[i].imshow(
+            inputs[i].detach().numpy().T,
+            aspect='auto',
+            cmap='Greys',
+            interpolation='nearest'
+        )
+        target_seq = targets[i, :, 0].detach().numpy()
+        pred_seq = ys[i, :, 0].detach().numpy()
+        
+        y_target = 3 - (target_seq * 3)
+        y_pred = 3 - (pred_seq * 3)
+
+        #Overlay the lines for target and moel prediction
+        axes[i].plot(y_target, color='red', label='Target', linewidth=2)
+        axes[i].plot(y_pred, color='green', label='RNN Prediction', linestyle='--')
+
+        #Labels and formatting
+        axes[i].set_yticks([0, 1, 2, 3])
+        axes[i].set_yticklabels(['A', 'B', 'C', 'R'])
+        axes[i].set_ylabel(f"Trial {i}")
+
+    axes[-1].set_xlabel("Timestep")
+    # Only show legend on the first subplot
+    axes[0].legend(loc='upper right', fontsize='small')
+    plt.tight_layout()
+    plt.show()
+
+rnn, loss_history = train_model(ScratchRNN(), lr, epochs, batches_per_epoch, batch_size)
+plot_predictions(rnn)

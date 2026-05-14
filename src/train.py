@@ -6,11 +6,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-lr = TRAINING["lr"]
-batch_size = TRAINING["batch_size"]
-epochs = TRAINING["epochs"]
-batches_per_epoch = TRAINING["batches_per_epoch"]
-
 
 
 
