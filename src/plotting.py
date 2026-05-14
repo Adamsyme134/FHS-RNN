@@ -42,3 +42,7 @@ def plot_task_batch():
 
     plt.tight_layout()
     plt.show()
+
+def plot_predictions(rnn, batch_size = 5):
+    #Make fresh batch for testing
+    inputs, targets, lengths, mask = generate_batch(batch_size)

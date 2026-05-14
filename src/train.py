@@ -1,7 +1,10 @@
-from models import ScratchRNN
+from models import ScratchRNN, ScratchRNNnumpy
 from task import *
 import numpy as np
 from configs import TRAINING
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 lr = TRAINING["lr"]
 batch_size = TRAINING["batch_size"]
@@ -9,9 +12,53 @@ epochs = TRAINING["epochs"]
 batches_per_epoch = TRAINING["batches_per_epoch"]
 
 
-rnn = ScratchRNN()
+
 
 def train_model(rnn, lr, epochs, batches_per_epoch, batch_size):
+    #Define the optimiser (what updates model parameters)
+    optimizer = optim.Adam(rnn.parameters(), lr=lr)
+    
+  
+    #reduction='none' allows manual masking later
+    criterion = nn.MSELoss(reduction='none') #use mean squared error
+    
+    loss_history = []
+    rnn.train() # Set model to training mode
+
+    for e in range(epochs):
+        epoch_loss = 0
+        for b in range(batches_per_epoch):
+            # Get a new batch
+            padded_inputs, padded_targets, lengths, mask = generate_batch(batch_size)
+            
+            optimizer.zero_grad() # Clear previous gradients
+            
+            # ys shape: (batch_size, seq_len, output_dim)
+            ys, hs = rnn(padded_inputs) #runs rnn.forward 
+    
+            sq_error = criterion(ys, padded_targets) # Calculate element-wise MSE
+            mask_expanded = mask.unsqueeze(-1) # Expand mask to match output dimensions (batch, seq, output_dim)
+            masked_loss = (sq_error * mask_expanded).sum() / mask_expanded.sum() # Apply mask and calculate mean with only real (not padded) data
+            
+            masked_loss.backward() #runs all of the calculations for determining gradients
+            
+            nn.utils.clip_grad_norm_(rnn.parameters(), max_norm=5.0) #clips gradient to prevent explosion
+            
+            optimizer.step() #update the weights and biases
+            
+            epoch_loss += masked_loss.item()
+
+        avg_loss = epoch_loss / batches_per_epoch
+        loss_history.append(avg_loss)
+        print(f"Epoch: {e} | Loss: {avg_loss:.4f}")
+
+    return rnn, loss_history
+
+
+
+def train_model_numpy(rnn, lr, epochs, batches_per_epoch, batch_size): 
+
+    #remember to pass ScratchRNNnumpy as rnn
     loss_history = []
     for e in range (epochs):
         epoch_loss = 0
@@ -78,8 +125,9 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size):
             rnn.by -= lr * dby / batch_size
 
             epoch_loss += loss
-        avg_loss /= (batches_per_epoch)
+        avg_loss = epoch_loss/batches_per_epoch
         loss_history.append(avg_loss)
         print(f"Epoch: {e} | Loss: {avg_loss:.4f}")
     
     return rnn, loss_history #returns a fully trained RNN
+
