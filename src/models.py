@@ -29,7 +29,7 @@ class ScratchRNN():
 
         hs = [] #stores hidden states across time
         ys = [] #stores outputs across time
-
+        xs = []
         for x in inputs:
             x = x.reshape(-1,1) #converts into a column vector [0,1,0,0] -> [[0],[1],[0],[0]]
 
@@ -44,5 +44,6 @@ class ScratchRNN():
 
             hs.append(h)
             ys.append(y)
-        return ys, hs
+            xs.append(x) #stores reshaped inputs
+        return ys, hs, xs
 

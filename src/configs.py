@@ -18,6 +18,6 @@ MODEL = {
 }
 
 TRAINING = {
-    "learning_rate": 1e-3,
+    "lr": 1e-3,
     "n_epochs": 200,
 }
