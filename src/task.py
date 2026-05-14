@@ -82,11 +82,11 @@ def generate_batch(batch_size):
 
     max_length = padded_inputs.shape[1]
 
-    # Creates a mask to show which values in each trial are real (True) and which are padding (False)
+    # Creates a mask to show which values in each trial are real (1) and which are padding (0)
     mask = (
         torch.arange(max_length)[None, :]
         < lengths[:, None]
-    ) 
+    ).int()
 
     return padded_inputs, padded_targets, lengths, mask
 

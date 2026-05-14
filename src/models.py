@@ -1,5 +1,5 @@
-import torch
-import torch.nn as nn
+#import torch
+#import torch.nn as nn
 from configs import SEED, MODEL
 import numpy as np
 
@@ -20,30 +20,35 @@ class ScratchRNN():
         self.Whh = np.random.randn(hidden_size, hidden_size) * 0.01 #recurrent hidden to hidden weights
         self.Why = np.random.randn(output_size, hidden_size) * 0.01 #hidden to output weights
 
-        self.bh = np.zeros((hidden_size, 1)) #hidden bias
-        self.by = np.zeros((output_size, 1)) #output bias
+        self.bh = np.zeros((1,hidden_size)) #hidden bias
+        self.by = np.zeros((1,output_size)) #output bias
 
     def forward(self, inputs):
+        batch_size = inputs.shape[0]
+        max_length = inputs.shape[1]
 
-        h = np.zeros((self.hidden_size, 1)) #creates an empty hidden state
+        h = np.zeros((batch_size,self.hidden_size)) #creates an empty hidden state
 
         hs = [] #stores hidden states across time
         ys = [] #stores outputs across time
-        xs = []
-        for x in inputs:
-            x = x.reshape(-1,1) #converts into a column vector [0,1,0,0] -> [[0],[1],[0],[0]]
-
+        
+        for t in range (max_length): #loops through every timestep
+            xt = inputs[: , t, :] #gets each input with shape (batch_size, input_size), so every input at time t from across all batches
+            
+           
             #Hidden state calculation (tanh nonlinearity)
             h = np.tanh(
-                self.Wxh @ x + 
-                self.Whh @ h +
+                xt @ self.Wxh.T + 
+                h @ self.Whh.T +
                 self.bh 
             )
 
-            y = self.Why @ h + self.by #output at this timestep
+            yt = h @ self.Why.T + self.by #output at this timestep
 
-            hs.append(h)
-            ys.append(y)
-            xs.append(x) #stores reshaped inputs
-        return ys, hs, xs
+            hs.append(h.copy())
+            ys.append(yt.copy())
+
+        ys = np.stack(ys, axis =1) #gives outputs in shape (batch_size, max_length, output_size)
+        hs = np.stack(hs, axis =1)
+        return ys, hs
 
