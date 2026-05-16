@@ -19,7 +19,7 @@ MODEL = {
 
 TRAINING = {
     "lr": 1e-3,
-    "epochs": 100,
-    "batches_per_epoch": 200,
+    "epochs": 150,
+    "batches_per_epoch": 50,
     "batch_size": 32
 }

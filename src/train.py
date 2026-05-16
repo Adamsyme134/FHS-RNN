@@ -9,7 +9,7 @@ import torch.optim as optim
 
 
 
-def train_model(rnn, lr, epochs, batches_per_epoch, batch_size):
+def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
     #Define the optimiser (what updates model parameters)
     optimizer = optim.Adam(rnn.parameters(), lr=lr)
     
@@ -24,7 +24,7 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size):
         epoch_loss = 0
         for b in range(batches_per_epoch):
             # Get a new batch
-            padded_inputs, padded_targets, lengths, mask = generate_batch(batch_size)
+            padded_inputs, padded_targets, lengths, mask = generate_batch(batch_size,["RANDOM"],["RANDOM"],SIGMA)
             
             optimizer.zero_grad() # Clear previous gradients
             
@@ -37,7 +37,7 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size):
             
             masked_loss.backward() #runs all of the calculations for determining gradients
             
-            nn.utils.clip_grad_norm_(rnn.parameters(), max_norm=5.0) #clips gradient to prevent explosion
+            nn.utils.clip_grad_norm_(rnn.parameters(), max_norm=1.0) #clips gradient to prevent explosion
             
             optimizer.step() #update the weights and biases
             
@@ -48,7 +48,6 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size):
         print(f"Epoch: {e} | Loss: {avg_loss:.4f}")
 
     return rnn, loss_history
-
 
 
 def train_model_numpy(rnn, lr, epochs, batches_per_epoch, batch_size): 

@@ -5,7 +5,7 @@ import torch.nn as nn
 
 
 class ScratchRNN(nn.Module):
-    def __init__(self, input_size=4, hidden_size=64, output_size=1):
+    def __init__(self, input_size=4, hidden_size=256, output_size=1):
         super(ScratchRNN, self).__init__() 
         self.hidden_size = hidden_size
         
@@ -20,7 +20,7 @@ class ScratchRNN(nn.Module):
         self.bh = nn.Parameter(torch.zeros(1, hidden_size))
         self.by = nn.Parameter(torch.zeros(1, output_size))
 
-    def forward(self, inputs):
+    def forward(self, inputs, lengths):
         # inputs shape: (batch_size, max_length, input_size)
         batch_size = inputs.shape[0]
         max_length = inputs.shape[1]
