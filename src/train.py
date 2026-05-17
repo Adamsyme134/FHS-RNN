@@ -46,6 +46,9 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
         avg_loss = epoch_loss / batches_per_epoch
         loss_history.append(avg_loss)
         print(f"Epoch: {e} | Loss: {avg_loss:.4f}")
+        if avg_loss <= 0.0003 and avg_loss !=0:
+            print("Target reached")
+            break
 
     return rnn, loss_history
 

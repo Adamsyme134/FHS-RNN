@@ -4,8 +4,13 @@ from task import *
 from models import *
 from train import *
 from configs import TRAINING
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from models import ScratchRNN
 
 def run_hyperparameter_search():
+
+
     #Hyperparameter ranges to try out
     hyperparameter_grid = {
         'learning_rate': [1e-3,2e-3],
@@ -48,3 +53,4 @@ def run_hyperparameter_search():
     print(f"Hyperparameter Search Complete")
     print(f"Best Loss: {best_loss:.5f}")
     print(f"Best Parameters: {best_params}")
+
