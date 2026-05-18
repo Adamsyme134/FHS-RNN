@@ -12,7 +12,7 @@ batches_per_epoch = TRAINING["batches_per_epoch"]
 
 
 def plot_task_batch():
-    padded_inputs, padded_targets, lengths, mask = generate_batch(5)
+    padded_inputs, padded_targets, lengths, mask = generate_batch(batch_size=5)
     print(padded_inputs, padded_targets, lengths, mask)
     fig, axes = plt.subplots(5, 1, figsize=(10, 8))
 
@@ -50,11 +50,14 @@ def plot_task_batch():
     plt.tight_layout()
     plt.show()
 
-def plot_predictions(rnn,batch_size =4):
+def plot_predictions(rnn,batch_size =4,is_reversed=False):
     
     with torch.no_grad(): #Do not track gradients 
         #Make fresh batch for testing
-        inputs, targets, lengths, mask = generate_batch(4,["A","B","B","C"],[1,1,0,0])
+        inputs, targets, lengths, mask = generate_batch(
+            is_reversed=is_reversed,
+            cues=["A","B","B","C"],
+            rewards=[1,1,0,0] if not is_reversed else [0,0,1,1])
 
         ys, hs = rnn.forward(inputs)
 
@@ -97,7 +100,7 @@ def plot_predictions(rnn,batch_size =4):
     plt.tight_layout()
     plt.show()
 
-def extract_hidden_states(rnn, num_trials_per_stim=50):
+def extract_hidden_states(rnn, num_trials_per_stim=50, is_reversed=False):
     #Generates a structured batch and extracts hidden states.
     rnn.eval()
     
@@ -105,14 +108,17 @@ def extract_hidden_states(rnn, num_trials_per_stim=50):
     cues = ["A"] * num_trials_per_stim + ["B"] * num_trials_per_stim + ["C"] * num_trials_per_stim
     
     with torch.no_grad():
-        inputs, targets, lengths, mask = generate_batch(len(cues), cues)
+        inputs, targets, lengths, mask = generate_batch(
+            is_reversed=is_reversed,
+            batch_size=len(cues),
+            cues=cues)
         
         # Run forward pass
         ys, hs = rnn(inputs)
         
     return hs, cues, lengths
 
-def plot_pca_trajectories(hs, cues, lengths):
+def plot_pca_trajectories(hs, cues, lengths, is_reversed = False):
     #Fits PCA to hidden states and plots 2D trajectories
     # Convert to numpy
     hs_np = hs.detach().numpy()
@@ -168,12 +174,17 @@ def plot_pca_trajectories(hs, cues, lengths):
         Line2D([0], [0], color='orange', lw=2),
         Line2D([0], [0], color='green', lw=2)
     ]
-    ax.legend(custom_lines, ['Stimulus A (100%)', 'Stimulus B (50%)', 'Stimulus C (0%)'])
+
+    if not is_reversed:
+        labels = ['Stimulus A (100%)', 'Stimulus B (50%)', 'Stimulus C (0%)']
+    else:
+        labels = ['Stimulus A (0%)', 'Stimulus B (50%)', 'Stimulus C (100%)']    
+    ax.legend(custom_lines, labels)
     
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.show()
 
-def plot_clusters(hs, cues, lengths):
+def plot_clusters(hs, cues, lengths, is_reversed=False):
     """Fits PCA to a single snapshot in time (end of delay) to show state clusters."""
     # Convert to numpy
     hs_np = hs.detach().numpy()
@@ -209,7 +220,8 @@ def plot_clusters(hs, cues, lengths):
         )
 
     # Formatting
-    plt.title("Representational Snapshot (End of Delay Period)")
+    reversed_title = "Normal inputs" if not is_reversed else "Reversed inputs"
+    plt.title("Representational Snapshot (End of Delay Period) | "+reversed_title)
     
     # Show how much variance the components actually capture for these snapshots
     pc1_var = pca.explained_variance_ratio_[0] * 100
@@ -224,12 +236,18 @@ def plot_clusters(hs, cues, lengths):
         Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', markersize=10),
         Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=10)
     ]
-    ax.legend(custom_legend, ['Stimulus A (100%)', 'Stimulus B (50%)', 'Stimulus C (0%)'])
+
+    if not is_reversed:
+        labels = ['Stimulus A (100%)', 'Stimulus B (50%)', 'Stimulus C (0%)']
+    else:
+        labels = ['Stimulus A (0%)', 'Stimulus B (50%)', 'Stimulus C (100%)']
+        
+    ax.legend(custom_legend, labels)
     
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.show()
 
-def plot_distance_matrix(hs, cues, lengths):
+def plot_distance_matrix(hs, cues, lengths, is_reversed=False):
     #Calculate the euclidean distance between representations of stimuli
     hs_np = hs.detach().numpy()
     batch_size = hs_np.shape[0]
@@ -250,11 +268,14 @@ def plot_distance_matrix(hs, cues, lengths):
         'C': np.mean(snapshots['C'], axis=0)
     }    
 
-    #Calculate euclidean distances
-    labels = ['A (100%)', 'B (50%)', 'C (0%)']
+    
+    if not is_reversed:
+        labels = ['Stimulus A (100%)', 'Stimulus B (50%)', 'Stimulus C (0%)']
+    else:
+        labels = ['Stimulus A (0%)', 'Stimulus B (50%)', 'Stimulus C (100%)']
     keys = ['A', 'B', 'C']
     dist_matrix = np.zeros((3, 3)) 
-
+    #Calculate euclidean distances
     for i, k1 in enumerate(keys):
         for j, k2 in enumerate(keys):
             dist_matrix[i,j] = np.linalg.norm(centroids[k1] - centroids[k2]) #Distance formula
@@ -278,11 +299,20 @@ def plot_distance_matrix(hs, cues, lengths):
     plt.show()    
 
 
+#Train the model
+#train_model(ScratchRNN(), lr, epochs, batches_per_epoch, batch_size)
+#Plotting the baseline (pre-reversal)
+rnn = ScratchRNN()
+rnn.load_state_dict(torch.load("weights_baseline.pth")) #load pretrained model
 
-rnn, loss_history = train_model(ScratchRNN(), lr, epochs, batches_per_epoch, batch_size)
+hs_base, cues_base, lengths_base = extract_hidden_states(rnn, num_trials_per_stim=100, is_reversed=False)
+plot_clusters(hs_base, cues_base, lengths_base, is_reversed=False)
+plot_distance_matrix(hs_base, cues_base, lengths_base, is_reversed=False)
 
-hs, cues, lengths = extract_hidden_states(rnn, num_trials_per_stim=100)
-plot_pca_trajectories(hs, cues, lengths)
-plot_clusters(hs,cues,lengths)
-plot_distance_matrix(hs, cues, lengths)
-#plot_predictions(rnn)
+#Plot the fully reversed model
+rnn_rev = ScratchRNN()
+rnn_rev.load_state_dict(torch.load("weights_final_reversal.pth"))
+
+hs_rev, cues_rev, lengths_rev = extract_hidden_states(rnn_rev, num_trials_per_stim=100, is_reversed=True)
+plot_clusters(hs_rev, cues_rev, lengths_rev, is_reversed=True)
+plot_distance_matrix(hs_rev, cues_rev, lengths_rev, is_reversed=True)

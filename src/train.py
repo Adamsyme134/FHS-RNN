@@ -1,7 +1,7 @@
 from models import ScratchRNN, ScratchRNNnumpy
 from task import *
 import numpy as np
-from configs import TRAINING
+from configs import TRAINING, TASK
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,7 +12,8 @@ import torch.optim as optim
 def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
     #Define the optimiser (what updates model parameters)
     optimizer = optim.Adam(rnn.parameters(), lr=lr)
-    
+    reversal_epoch = TRAINING["reversal_epoch"]
+
   
     #reduction='none' allows manual masking later
     criterion = nn.MSELoss(reduction='none') #use mean squared error
@@ -22,9 +23,10 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
 
     for e in range(epochs):
         epoch_loss = 0
+        is_reversed = True if e >= reversal_epoch else False
         for b in range(batches_per_epoch):
             # Get a new batch
-            padded_inputs, padded_targets, lengths, mask = generate_batch(batch_size,["RANDOM"],["RANDOM"],SIGMA)
+            padded_inputs, padded_targets, lengths, mask = generate_batch(is_reversed=is_reversed, batch_size=batch_size,SIGMA=SIGMA)
             
             optimizer.zero_grad() # Clear previous gradients
             
@@ -46,21 +48,28 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
         avg_loss = epoch_loss / batches_per_epoch
         loss_history.append(avg_loss)
         print(f"Epoch: {e} | Loss: {avg_loss:.4f}")
-        if avg_loss <= 0.0003 and avg_loss !=0:
-            print("Target reached")
-            break
+        
+        # Save checkpoints 
+        if e == (reversal_epoch - 1): # Baseline once pretty much fully trained on normal stimuli
+            torch.save(rnn.state_dict(), "weights_baseline.pth")
+            
+        elif e == (reversal_epoch + 5): # 5 epochs into the Reversal (Confusion)
+            torch.save(rnn.state_dict(), "weights_early_reversal.pth")
+            
+        elif e == (epochs - 1): # The very end (Fully Reversed)
+            torch.save(rnn.state_dict(), "weights_final_reversal.pth")
 
     return rnn, loss_history
 
 
 def train_model_numpy(rnn, lr, epochs, batches_per_epoch, batch_size): 
-
+    REVERSED = TASK["reversed"]
     #remember to pass ScratchRNNnumpy as rnn
     loss_history = []
     for e in range (epochs):
         epoch_loss = 0
         for b in range (batches_per_epoch): #eachx batch will update the parameters once
-            padded_inputs, padded_targets, lengths, mask = generate_batch(batch_size)
+            padded_inputs, padded_targets, lengths, mask = generate_batch(batch_size=batch_size)
             #for now, convert tensors -> numpy arrays
             padded_inputs = padded_inputs.numpy()
             padded_targets = padded_targets.numpy()

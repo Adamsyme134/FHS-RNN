@@ -21,5 +21,6 @@ TRAINING = {
     "lr": 1e-3,
     "epochs": 150,
     "batches_per_epoch": 50,
-    "batch_size": 32
+    "batch_size": 32,
+    "reversal_epoch":75
 }
