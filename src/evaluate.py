@@ -13,9 +13,9 @@ def run_hyperparameter_search():
 
     #Hyperparameter ranges to try out
     hyperparameter_grid = {
-        'learning_rate': [1e-3,2e-3],
-        'hidden_size': [128, 256],
-        'target_sigma': [1.5, 1.8]
+        'learning_rate': [1e-3],
+        'hidden_size': [256],
+        'target_sigma': [1.2,1.5]
     }
     #get constant parameters
     epochs = TRAINING["epochs"]
@@ -54,3 +54,4 @@ def run_hyperparameter_search():
     print(f"Best Loss: {best_loss:.5f}")
     print(f"Best Parameters: {best_params}")
 
+run_hyperparameter_search()

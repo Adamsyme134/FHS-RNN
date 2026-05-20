@@ -5,13 +5,13 @@ from configs import TRAINING, TASK
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
+import os
 
 
 
 def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
     #Define the optimiser (what updates model parameters)
-    optimizer = optim.Adam(rnn.parameters(), lr=lr)
+    optimizer = optim.Adam(rnn.parameters(), lr=lr, weight_decay=1e-4)
     reversal_epoch = TRAINING["reversal_epoch"]
 
   
@@ -24,6 +24,9 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
     for e in range(epochs):
         epoch_loss = 0
         is_reversed = True if e >= reversal_epoch else False
+        if e == reversal_epoch:
+            print("REVERSING STIMULUS VALUES")
+    
         for b in range(batches_per_epoch):
             # Get a new batch
             padded_inputs, padded_targets, lengths, mask = generate_batch(is_reversed=is_reversed, batch_size=batch_size,SIGMA=SIGMA)
@@ -48,16 +51,20 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
         avg_loss = epoch_loss / batches_per_epoch
         loss_history.append(avg_loss)
         print(f"Epoch: {e} | Loss: {avg_loss:.4f}")
-        
+
+        save_dir = "checkpoints"
+        os.makedirs(save_dir, exist_ok=True)
         # Save checkpoints 
         if e == (reversal_epoch - 1): # Baseline once pretty much fully trained on normal stimuli
-            torch.save(rnn.state_dict(), "weights_baseline.pth")
+            torch.save(rnn.state_dict(), os.path.join(save_dir,"weights_baseline.pth"))
             
         elif e == (reversal_epoch + 5): # 5 epochs into the Reversal (Confusion)
-            torch.save(rnn.state_dict(), "weights_early_reversal.pth")
+            torch.save(rnn.state_dict(), os.path.join(save_dir,"weights_early_reversal.pth"))
             
         elif e == (epochs - 1): # The very end (Fully Reversed)
-            torch.save(rnn.state_dict(), "weights_final_reversal.pth")
+            torch.save(rnn.state_dict(), os.path.join(save_dir,"weights_final_reversal.pth"))
+        if e % 2 == 0: #for animating a learning PCA
+            torch.save(rnn.state_dict(), os.path.join(save_dir,f"weights_epoch_{e}.pth"))
 
     return rnn, loss_history
 
