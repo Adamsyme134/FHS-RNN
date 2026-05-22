@@ -10,7 +10,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 
 
 
-def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
+def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2, probe=False):
 
     #device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     device = torch.device("cpu")
@@ -23,13 +23,10 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
     
     scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=1)#0.99)
 
-    #To probe the model for batch-resolved plot
-    cues_probe = ["A"] * 20 + ["B"] * 20 + ["C"] * 20
-    with torch.no_grad():
-        probe_inputs, _, probe_lengths, _ = generate_batch(
-            is_reversed=False, batch_size=60, cues=cues_probe, SIGMA=SIGMA
-        )
-        probe_inputs = probe_inputs.to(device)
+    # Unpack the probe data (for batch resolved plot)
+    probe_inputs, _, probe_lengths, _, cues_probe = dataset["probe"]
+    probe_inputs = probe_inputs.to(device)
+
     live_performance = {'A': [], 'B': [], 'C': []}
 
     loss_history = []
@@ -45,7 +42,7 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
 
     for e in range(epochs):
         epoch_loss = 0
-        is_reversed = True if e >= reversal_epoch else False
+        
         if e == reversal_epoch:
             print("REVERSING STIMULUS VALUES - Resetting LR")
             for param_group in optimizer.param_groups:
@@ -53,10 +50,13 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
 
             #Restart the scheduler so LR decays from the top again
             scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
-    
+
+        epoch_data = dataset["train"][e] #List of batch data for this epoch
+
         for b in range(batches_per_epoch):
-            # Get a new batch
-            padded_inputs, padded_targets, lengths, mask = generate_batch(is_reversed=is_reversed, batch_size=batch_size,SIGMA=SIGMA)
+            # Get the batch data
+            padded_inputs, padded_targets, lengths, mask = epoch_data[b]
+            
             padded_inputs = padded_inputs.to(device)
             padded_targets = padded_targets.to(device)
             mask = mask.to(device)    
@@ -79,19 +79,20 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
             epoch_loss += masked_loss.item()
 
             #PROBE THE NETWORK (Every batch)
-            rnn.eval()
-            with torch.no_grad():
-                ys_probe, _ = rnn(probe_inputs)
-        
-                # Extract the specific time points for the whole batch at once
-                # Shape: (60)
-                vals = ys_probe[batch_idx, t_anticipation, 0]
-                
-                # Calculate means natively on the GPU, then pull just the final number (.item()) to CPU
-                live_performance['A'].append(vals[idx_A].mean().item())
-                live_performance['B'].append(vals[idx_B].mean().item())
-                live_performance['C'].append(vals[idx_C].mean().item())
-                
+            if probe:
+                rnn.eval()
+                with torch.no_grad():
+                    ys_probe, _ = rnn(probe_inputs)
+            
+                    # Extract the specific time points for the whole batch at once
+                    # Shape: (60)
+                    vals = ys_probe[batch_idx, t_anticipation, 0]
+                    
+                    # Calculate means natively on the GPU, then pull just the final number (.item()) to CPU
+                    live_performance['A'].append(vals[idx_A].mean().item())
+                    live_performance['B'].append(vals[idx_B].mean().item())
+                    live_performance['C'].append(vals[idx_C].mean().item())
+                    
             rnn.train()
 
         avg_loss = epoch_loss / batches_per_epoch

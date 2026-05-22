@@ -660,8 +660,9 @@ def plot_all_graphs(train=False, plots=None):
     plots = set(plots)
 
     if train:
+        dataset = generate_full_dataset(cfg.epochs, cfg.batches_per_epoch, cfg.batch_size, cfg.reversal_epoch)
         _, _, live_performance = train_model(
-            ScratchRNN(), cfg.lr, cfg.epochs, cfg.batches_per_epoch, cfg.batch_size
+            ScratchRNN(), dataset, cfg.lr, cfg.epochs, cfg.batches_per_epoch, cfg.batch_size
         )
     else:
         live_performance = load_live_performance()

@@ -9,7 +9,8 @@ TASK = {
       "A": 1,
       "B": 0.5,
       "C": 0
-    }
+    },
+    "noise_stdev":0.1
 }
 
 MODEL = {
@@ -20,7 +21,7 @@ MODEL = {
 
 TRAINING = {
     "lr": 1e-3,
-    "epochs": 100,
+    "epochs": 400,
     "batches_per_epoch": 50,
     "batch_size": 32,
     "reversal_epoch":200

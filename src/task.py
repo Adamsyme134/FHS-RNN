@@ -16,7 +16,16 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from scipy.ndimage import gaussian_filter1d
 
-def generate_trial(cue_choice, reward_choice, SIGMA=1.2, is_reversed = False):
+def add_guassian_noise(inputs, std_dev=TASK["noise_stdev"]):
+    noise = np.random.normal(loc=0.0, scale=std_dev, size=inputs.shape)
+    noisy_inputs = inputs + noise
+
+    #Clip to keep inputs within 0-1
+    noisy_inputs = np.clip(noisy_inputs, 0.0, 1.0)
+
+    return noisy_inputs
+
+def generate_trial(cue_choice, reward_choice, SIGMA=1.2, is_reversed = False, noise=True):
 
     stimulus_duration = TASK["stimulus_duration"]
     delay_duration = TASK["delay_duration"]
@@ -59,17 +68,18 @@ def generate_trial(cue_choice, reward_choice, SIGMA=1.2, is_reversed = False):
 
     targets[T-1,0] = rewarded #gives the reward (if randomly selected) 
 
-    #Apply guassian smoothing to the target line
+    if noise:
+        inputs = add_guassian_noise(inputs)
     
     return inputs,targets
-
 
 def generate_batch(*, 
     is_reversed=False,
     batch_size=4,
     cues=["RANDOM"],
     rewards=["RANDOM"],
-    SIGMA=1.5):
+    SIGMA=1.5,
+    noise=True):
 
     batch_inputs = []
     batch_targets =[]
@@ -80,7 +90,7 @@ def generate_batch(*,
         cue_choice = cues[t] if cues[0] != "RANDOM" else "RANDOM"
         
         reward_choice = rewards[t] if rewards[0] != "RANDOM" else "RANDOM"
-        inputs, targets = generate_trial(cue_choice,reward_choice,SIGMA,is_reversed)
+        inputs, targets = generate_trial(cue_choice,reward_choice,SIGMA,is_reversed,noise)
         
         inputs = torch.tensor(inputs, dtype = torch.float32)
         targets = torch.tensor(targets, dtype = torch.float32)
@@ -114,4 +124,37 @@ def generate_batch(*,
 
     return padded_inputs, padded_targets, lengths, mask
 
+def generate_full_dataset(epochs, batches_per_epoch, batch_size, reversal_epoch, SIGMA=1.5):
+    print(f"Generating full dataset for {epochs} epochs...")
+    
+    dataset= {
+        "train": [],
+        "val": [], #Add later
+        "test": [], #Add later
+        "probe": None
+    }
 
+    for e in range(epochs):
+        is_reversed = e >= reversal_epoch
+        epoch_batches = []
+        for _ in range(batches_per_epoch):
+            batch = generate_batch(
+                is_reversed=is_reversed, 
+                batch_size=batch_size, 
+                SIGMA=SIGMA
+            )
+            epoch_batches.append(batch)
+        dataset["train"].append(epoch_batches) #each index is an epoch
+
+    cues_probe = ["A"] * 20 + ["B"] * 20 + ["C"] * 20
+    with torch.no_grad():
+        probe_inputs, padded_targets, probe_lengths, mask = generate_batch(
+            is_reversed=False, 
+            batch_size=60, 
+            cues=cues_probe, 
+            SIGMA=SIGMA
+        )    
+        dataset["probe"] = (probe_inputs, padded_targets, probe_lengths, mask, cues_probe)
+    
+    print("Dataset generation completed.")
+    return dataset
