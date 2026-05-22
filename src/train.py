@@ -6,31 +6,61 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import os
+import torch.optim.lr_scheduler as lr_scheduler
 
 
 
 def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
-    #Define the optimiser (what updates model parameters)
+
+    #device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("cpu")
+    print(f"Using device: {device}")    
+    rnn.to(device)
+
     optimizer = optim.Adam(rnn.parameters(), lr=lr, weight_decay=1e-4)
     reversal_epoch = TRAINING["reversal_epoch"]
-
-  
-    #reduction='none' allows manual masking later
     criterion = nn.MSELoss(reduction='none') #use mean squared error
     
+    scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=1)#0.99)
+
+    #To probe the model for batch-resolved plot
+    cues_probe = ["A"] * 20 + ["B"] * 20 + ["C"] * 20
+    with torch.no_grad():
+        probe_inputs, _, probe_lengths, _ = generate_batch(
+            is_reversed=False, batch_size=60, cues=cues_probe, SIGMA=SIGMA
+        )
+        probe_inputs = probe_inputs.to(device)
+    live_performance = {'A': [], 'B': [], 'C': []}
+
     loss_history = []
     rnn.train() # Set model to training mode
+
+    idx_A = torch.tensor([i for i, c in enumerate(cues_probe) if c == 'A'])
+    idx_B = torch.tensor([i for i, c in enumerate(cues_probe) if c == 'B'])
+    idx_C = torch.tensor([i for i, c in enumerate(cues_probe) if c == 'C'])
+    
+    batch_idx = torch.arange(len(cues_probe))
+    t_anticipation = (probe_lengths - 2) 
+
 
     for e in range(epochs):
         epoch_loss = 0
         is_reversed = True if e >= reversal_epoch else False
         if e == reversal_epoch:
-            print("REVERSING STIMULUS VALUES")
+            print("REVERSING STIMULUS VALUES - Resetting LR")
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+
+            #Restart the scheduler so LR decays from the top again
+            scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
     
         for b in range(batches_per_epoch):
             # Get a new batch
             padded_inputs, padded_targets, lengths, mask = generate_batch(is_reversed=is_reversed, batch_size=batch_size,SIGMA=SIGMA)
-            
+            padded_inputs = padded_inputs.to(device)
+            padded_targets = padded_targets.to(device)
+            mask = mask.to(device)    
+
             optimizer.zero_grad() # Clear previous gradients
             
             # ys shape: (batch_size, seq_len, output_dim)
@@ -47,6 +77,22 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
             optimizer.step() #update the weights and biases
             
             epoch_loss += masked_loss.item()
+
+            #PROBE THE NETWORK (Every batch)
+            rnn.eval()
+            with torch.no_grad():
+                ys_probe, _ = rnn(probe_inputs)
+        
+                # Extract the specific time points for the whole batch at once
+                # Shape: (60)
+                vals = ys_probe[batch_idx, t_anticipation, 0]
+                
+                # Calculate means natively on the GPU, then pull just the final number (.item()) to CPU
+                live_performance['A'].append(vals[idx_A].mean().item())
+                live_performance['B'].append(vals[idx_B].mean().item())
+                live_performance['C'].append(vals[idx_C].mean().item())
+                
+            rnn.train()
 
         avg_loss = epoch_loss / batches_per_epoch
         loss_history.append(avg_loss)
@@ -65,8 +111,14 @@ def train_model(rnn, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2):
             torch.save(rnn.state_dict(), os.path.join(save_dir,"weights_final_reversal.pth"))
         if e % 2 == 0: #for animating a learning PCA
             torch.save(rnn.state_dict(), os.path.join(save_dir,f"weights_epoch_{e}.pth"))
+        
+        scheduler.step()
 
-    return rnn, loss_history
+    save_path = os.path.join("checkpoints", "live_performance.pt")
+    torch.save(live_performance, save_path)
+    print(f"Saved live performance data to {save_path}")   
+
+    return rnn, loss_history, live_performance
 
 
 def train_model_numpy(rnn, lr, epochs, batches_per_epoch, batch_size): 

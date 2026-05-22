@@ -15,7 +15,7 @@ class ScratchRNN(nn.Module):
         # Define weights + biases randomly to start
         self.Wxh = nn.Parameter(torch.randn(hidden_size, input_size) * 0.01)
         self.Whh = nn.Parameter(torch.randn(hidden_size, hidden_size) * 0.01)
-        self.Why = nn.Parameter(torch.randn(output_size, hidden_size) * 0.01)
+        self.Why = nn.Parameter(torch.randn(output_size, hidden_size) * 0.01) #kaiming normal initialisation? CHANGE?
 
         self.bh = nn.Parameter(torch.zeros(1, hidden_size))
         self.by = nn.Parameter(torch.zeros(1, output_size))
