@@ -6,13 +6,17 @@ import numpy as np
 from sklearn.decomposition import PCA
 from matplotlib.lines import Line2D
 from matplotlib.animation import FuncAnimation
-from evaluate import run_hyperparameter_search
+from evaluate import *
 from dataclasses import dataclass
 from pathlib import Path
 import ffmpeg
 import glob
 import re
 import torch
+import datetime
+import uuid
+import json
+import seaborn as sns
 
 #Configurations for plotting
 @dataclass
@@ -27,7 +31,7 @@ class PlotConfig:
 
 #----- SPECIFIC PLOTS ----
 def plot_task_batch():
-    padded_inputs, padded_targets, lengths, mask = generate_batch(batch_size=5)
+    padded_inputs, padded_targets, lengths, mask, cues = generate_batch(batch_size=5)
     print(padded_inputs, padded_targets, lengths, mask)
     fig, axes = plt.subplots(5, 1, figsize=(10, 8))
 
@@ -75,7 +79,7 @@ def plot_learning_curves(df_results):
         plt.plot(row['loss_history'], label=label, alpha=0.7)
         
     plt.title('Learning Curves across Hyperparameters')
-    plt.xlabel('Epochs (or Batches)')
+    plt.xlabel('Epochs')
     plt.ylabel('Loss')
     # Place legend outside the plot so it doesn't cover the lines
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left') 
@@ -104,7 +108,8 @@ def plot_predictions(rnn,batch_size =4,is_reversed=False):
     
     with torch.no_grad(): #Do not track gradients 
         #Make fresh batch for testing
-        inputs, targets, lengths, mask = generate_batch(
+        inputs, targets, lengths, mask, cues = generate_batch(
+            trial_params=TASK,
             is_reversed=is_reversed,
             cues=["A","B","B","C"],
             rewards=[1,1,0,0] if not is_reversed else [0,0,1,1])
@@ -150,7 +155,7 @@ def plot_predictions(rnn,batch_size =4,is_reversed=False):
     plt.tight_layout()
     plt.show()
 
-def plot_pca_trajectories(hs, cues, lengths, inputs, is_reversed = False, pca=None):
+def plot_pca_trajectories(hs, cues, lengths, inputs, is_reversed = False, pca=None, run_dir=None):
     #Fits PCA to hidden states and plots 2D trajectories
 
     colors = {
@@ -255,16 +260,21 @@ def plot_pca_trajectories(hs, cues, lengths, inputs, is_reversed = False, pca=No
               bbox_to_anchor=(0.5, -0.25), ncol=3, fontsize='small')
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.tight_layout()
-    plt.show()
+    if run_dir:
+        suffix = "reversed" if is_reversed else "normal"
+        plt.savefig(Path(run_dir) / f"pca_trajectory_{suffix}.png", dpi=300)
+        plt.close() # Prevents memory leaks by closing the figure instead of showing it
+    else:
+        plt.show()
 
-def animate_pca_trajectories(weight_paths, is_reversed=False, num_trials_per_stim=100):
+def animate_pca_trajectories(weight_paths, is_reversed=False, num_trials_per_stim=100, run_dir=None):
     # 1. Initialize network and generate fixed input data
     # Use the exact same trials for every epoch to cleanly see learning
     rnn = ScratchRNN()
     cues = ["A"] * num_trials_per_stim + ["B"] * num_trials_per_stim + ["C"] * num_trials_per_stim
     
     with torch.no_grad():
-        inputs, targets, lengths, mask = generate_batch(
+        inputs, targets, lengths, mask, cues = generate_batch(
             is_reversed=is_reversed,
             batch_size=len(cues),
             cues=cues
@@ -395,7 +405,7 @@ def animate_pca_trajectories(weight_paths, is_reversed=False, num_trials_per_sti
     plt.tight_layout()
     return ani
 
-def plot_clusters(hs, cues, lengths, is_reversed=False):
+def plot_clusters(hs, cues, lengths, is_reversed=False, run_dir=None):
     """Fits PCA to a single snapshot in time (end of delay) to show state clusters."""
     # Convert to numpy
     hs_np = hs.detach().numpy()
@@ -456,9 +466,14 @@ def plot_clusters(hs, cues, lengths, is_reversed=False):
     ax.legend(custom_legend, labels)
     
     plt.grid(True, linestyle='--', alpha=0.6)
-    plt.show()
+    if run_dir:
+        suffix = "reversed" if is_reversed else "normal"
+        plt.savefig(Path(run_dir) / f"pca_clusters_{suffix}.png", dpi=300)
+        plt.close() # Prevents memory leaks by closing the figure instead of showing it
+    else:
+        plt.show()
 
-def plot_distance_matrix(hs, cues, lengths, is_reversed=False):
+def plot_distance_matrix(hs, cues, lengths, is_reversed=False, run_dir=None):
     #Calculate the euclidean distance between representations of stimuli
     hs_np = hs.detach().numpy()
     batch_size = hs_np.shape[0]
@@ -507,7 +522,12 @@ def plot_distance_matrix(hs, cues, lengths, is_reversed=False):
     ax.set_xticklabels(labels)
     ax.set_yticklabels(labels)
     plt.title("Representational Distance Matrix")
-    plt.show()    
+    if run_dir:
+        suffix = "reversed" if is_reversed else "normal"
+        plt.savefig(Path(run_dir) / f"pca_distance_matrix_{suffix}.png", dpi=300)
+        plt.close() # Prevents memory leaks by closing the figure instead of showing it
+    else:
+        plt.show()  
 
 def plot_batch_timeline(live_performance, batches_per_epoch, reversal_epoch):
     total_batches = len(live_performance['A'])
@@ -550,24 +570,130 @@ def plot_batch_timeline(live_performance, batches_per_epoch, reversal_epoch):
     plt.tight_layout()
     plt.show()
 
-# ---- UTILITIES ------
-def extract_hidden_states(rnn, num_trials_per_stim=50, is_reversed=False):
-    #Generates a structured batch and extracts hidden states.
-    rnn.eval()
+def plot_decoding_stimulus(accuracies_dict, avg_accuracy, avg_stimulus_start_timestep, avg_stimulus_end_timestep, reversed=False,run_dir=None):
+    #Plots the decoding of stimulus identity
+    plt.figure(figsize=(8, 5))
     
-    # Create an equal number of A, B, and C trials
-    cues = ["A"] * num_trials_per_stim + ["B"] * num_trials_per_stim + ["C"] * num_trials_per_stim
+    # Assign distinct colors 
+    # Make the same ----
+    colors = {'A': 'crimson', 'B': 'forestgreen', 'C': 'royalblue'}
     
-    with torch.no_grad():
-        inputs, targets, lengths, mask = generate_batch(
-            is_reversed=is_reversed,
-            batch_size=len(cues),
-            cues=cues)
+    # Plot each cue's accuracy trajectory
+    for cue, acc_list in accuracies_dict.items():
+        times = np.arange(len(acc_list))
+        color = colors.get(cue, 'black') # Fallback to black if cue isn't in dict
         
-        # Run forward pass
-        ys, hs = rnn(inputs)
+        plt.plot(times, acc_list, marker='o', markersize=4, linewidth=2, 
+                 label=f'Stimulus {cue}', color=color)
+
+    times = np.arange(len(avg_accuracy))
+        
+    plt.plot(times, avg_accuracy,alpha=0.4, marker='o', markersize=2, linewidth=2, 
+            label='Avg accuracy', color="black", linestyle='--')
+
+
+    # Plot chance level
+    # If ever introduce reversal trials with more/fewer cues, change 1/3 accordingly
+    plt.axhline(y=1/3, color='gray', linestyle='--', label='Chance (33%)')
+
+      # Stimulus window boundaries
+    plt.axvline(
+        x=avg_stimulus_start_timestep,
+        color='black',
+        linestyle=':',
+        linewidth=2
+    )
+
+    plt.axvline(
+        x=avg_stimulus_end_timestep,
+        color='black',
+        linestyle=':',
+        linewidth=2
+    )
+    # Label between the lines
+    midpoint = (
+        avg_stimulus_start_timestep +
+        avg_stimulus_end_timestep
+    ) / 2
+
+    plt.text(
+        midpoint,
+        -0.08,  # slightly below x-axis
+        "Stimulus Window",
+        ha='center',
+        va='top',
+        transform=plt.gca().get_xaxis_transform()
+    )
+    # Formatting
+    plt.title("Decoding Accuracy by Stimulus Identity")
+    plt.xlabel("Time Step")
+    plt.ylabel("Accuracy (True Positive Rate)")
+    plt.ylim(0, 1.05)
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
     
-    return hs, cues, lengths,inputs
+    if run_dir:
+        suffix = "reversed" if reversed else "normal"
+        plt.savefig(Path(run_dir) / f"decoding_stimulus_{suffix}.png", dpi=300)
+        plt.close() # Prevents memory leaks by closing the figure instead of showing it
+    else:
+        plt.show()
+
+def plot_decoding_trajectories(mean_predictions, reversed= False,run_dir=None):
+    #plots decoding of e.g. expected lick rate by cue type
+    plt.figure(figsize=(8, 5))
+    
+    # Match the colors you used in the classifier plot
+    colors = {'A': 'crimson', 'B': 'forestgreen', 'C': 'royalblue'}
+    
+    for cue, trajectory in mean_predictions.items():
+        times = np.arange(len(trajectory))
+        color = colors.get(cue, 'black')
+        
+        
+        plt.plot(times, trajectory, linewidth=2, label=f'Cue {cue}', color=color)
+
+    plt.title("Decoded Behavioral Trajectories (Predicted Lick Rate)")
+    plt.xlabel("Time Step")
+    plt.ylabel("Predicted Target Value")
+    
+    # Upper left is usually best here so it doesn't overlap the climbing trajectories
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    if run_dir:
+        suffix = "reversed" if reversed else "normal"
+        plt.savefig(Path(run_dir) / f"decoding_trajectory_{suffix}.png", dpi=300)
+        plt.close() # Prevents memory leaks by closing the figure instead of showing it
+    else:
+        plt.show() 
+# ---- UTILITIES ------
+def initialize_run_directory():
+
+    # Generate the Run ID
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_hash = uuid.uuid4().hex[:5]
+    run_id = f"run_{timestamp}_{unique_hash}"
+    
+    # Define the path
+    run_dir = Path(f"./results/{run_id}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Pull settings from existing TRAINING dictionary and save them
+    # Ensures  random seed and hyperparameters are added to the run_id
+    metadata = {
+        "run_id": run_id,
+        "timestamp": timestamp,
+        **TRAINING # Unpacks all hyperparameters from configs.py TRAINING 
+    }
+    
+    with open(run_dir / "config.json", "w") as f:
+        json.dump(metadata, f, indent=4)
+        
+    print(f" Run Directory Initialized: {run_dir}")
+    return run_dir
 
 def load_live_performance():
     try:
@@ -621,31 +747,47 @@ def run_reversal_animation(checkpoint_files, cfg):
     anim.save("pca_reversal.mp4", writer="ffmpeg", fps=cfg.fps)
     print("Saved pca_reversal.mp4!")
 
-def run_baseline_plots(cfg):
+def run_baseline_plots(cfg, run_dir=None):
     rnn = ScratchRNN()
     rnn.load_state_dict(torch.load("checkpoints/weights_baseline.pth"))
 
-    hs, cues, lengths, inputs = extract_hidden_states(
+    hs, cues, lengths, inputs, targets = extract_hidden_states(
         rnn, num_trials_per_stim=cfg.num_trials_per_stim, is_reversed=False
     )
-    plot_pca_trajectories(hs, cues, lengths, is_reversed=False, inputs=inputs)
-    plot_clusters(hs, cues, lengths, is_reversed=False)
-    plot_distance_matrix(hs, cues, lengths, is_reversed=False)
+    plot_pca_trajectories(hs, cues, lengths, is_reversed=False, inputs=inputs,run_dir=run_dir)
+    plot_clusters(hs, cues, lengths, is_reversed=False, run_dir=run_dir)
+    plot_distance_matrix(hs, cues, lengths, is_reversed=False, run_dir=run_dir)
     plot_predictions(rnn, is_reversed=False)
 
-def run_final_reversal_plots(cfg):
+def run_final_reversal_plots(cfg, run_dir=None):
     rnn = ScratchRNN()
     rnn.load_state_dict(torch.load("checkpoints/weights_final_reversal.pth"))
 
-    hs, cues, lengths, inputs = extract_hidden_states(
+    hs, cues, lengths, inputs, targets = extract_hidden_states(
         rnn, num_trials_per_stim=cfg.num_trials_per_stim, is_reversed=True
     )
-    plot_pca_trajectories(hs, cues, lengths, is_reversed=True, inputs=inputs)
-    plot_clusters(hs, cues, lengths, is_reversed=True)
-    plot_distance_matrix(hs, cues, lengths, is_reversed=True)
+    plot_pca_trajectories(hs, cues, lengths, is_reversed=True, inputs=inputs,run_dir=run_dir)
+    plot_clusters(hs, cues, lengths, is_reversed=True,run_dir=run_dir)
+    plot_distance_matrix(hs, cues, lengths, is_reversed=True,run_dir=run_dir)
     plot_predictions(rnn, is_reversed=True)
 
-def plot_all_graphs(train=False, plots=None):
+def run_decoding_analysis(run_dir):
+        #Pre-reversal
+        checkpoint="checkpoints/weights_baseline.pth"
+        accuracies_dict, avg_accuracy, avg_stimulus_start_timestep, avg_stimulus_end_timestep = train_stimulus_decoders(checkpoint, reversed=False)
+        plot_decoding_stimulus(accuracies_dict, avg_accuracy, avg_stimulus_start_timestep, avg_stimulus_end_timestep,reversed=False,run_dir=run_dir)
+
+        mean_predictions = train_continuous_decoders(checkpoint,reversed=False)
+        plot_decoding_trajectories(mean_predictions,reversed=False, run_dir=run_dir)
+        #Post-reversal
+        checkpoint="checkpoints/weights_final_reversal.pth"
+        accuracies_dict, avg_accuracy, avg_stimulus_start_timestep, avg_stimulus_end_timestep = train_stimulus_decoders(checkpoint,reversed=True)
+        plot_decoding_stimulus(accuracies_dict, avg_accuracy, avg_stimulus_start_timestep, avg_stimulus_end_timestep, reversed=True,run_dir=run_dir)
+
+        mean_predictions = train_continuous_decoders(checkpoint,reversed=True)
+        plot_decoding_trajectories(mean_predictions,reversed=True, run_dir=run_dir)
+
+def plot_all_graphs(train=False, plots=None, run_dir=None):
     cfg = PlotConfig(
         lr=TRAINING["lr"],
         batch_size=TRAINING["batch_size"],
@@ -660,7 +802,14 @@ def plot_all_graphs(train=False, plots=None):
     plots = set(plots)
 
     if train:
-        dataset = generate_full_dataset(cfg.epochs, cfg.batches_per_epoch, cfg.batch_size, cfg.reversal_epoch)
+        my_trial_counts = {"A": 10, "B": 10, "C": 12}
+        dataset = generate_full_dataset(
+            epochs=cfg.epochs,
+            trial_params=TASK,             
+            trial_counts=my_trial_counts, 
+            batches_per_epoch=cfg.batches_per_epoch,
+            reversal_epoch=cfg.reversal_epoch,
+        )
         _, _, live_performance = train_model(
             ScratchRNN(), dataset, cfg.lr, cfg.epochs, cfg.batches_per_epoch, cfg.batch_size
         )
@@ -681,13 +830,23 @@ def plot_all_graphs(train=False, plots=None):
         run_reversal_animation(checkpoint_files, cfg)
 
     if "baseline" in plots:
-        run_baseline_plots(cfg)
+        run_baseline_plots(cfg, run_dir=run_dir)
 
     if "final_reversal" in plots:
-        run_final_reversal_plots(cfg)
+        run_final_reversal_plots(cfg, run_dir=run_dir)
     
     if "learning_curves" in plots:
         df_results = run_hyperparameter_search()
         plot_learning_curves(df_results)
+        plot_heatmap(df_results, param1='hidden_size', param2='learning_rate')
 
-plot_all_graphs(train=True, plots = ["baseline"])
+    if "decoding" in plots:
+        run_decoding_analysis(run_dir=run_dir)
+if __name__ == "__main__":
+    #Initialize the run folder and configuration snapshot
+    save = input("Save graphs? (y/n): ").lower()
+    if save == "y":
+        current_run_dir = initialize_run_directory()
+    else:
+        current_run_dir = None
+    plot_all_graphs(train=True, plots=["baseline"],run_dir=current_run_dir)

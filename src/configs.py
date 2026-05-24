@@ -3,7 +3,7 @@ SEED = 42
 TASK = {
     "stimulus_duration": 10,
     "reward_duration": 1,
-    "delay_duration": 20, #20,
+    "delay_duration": 0, #20,
     "baseline_duration": 0,
     "reward_probs": {
       "A": 1,

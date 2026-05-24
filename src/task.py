@@ -214,7 +214,7 @@ class RLTask:
     def evaluate_sequence(self, stimuli, actions):
         #Evaluates model's action at every time step
         #Currently, action-1 is Go, action=0 is no go
-        rewards = torch.zeros(self.batch_size)
+        rewards = torch.zeros((self.batch_size, self.seq_len))
 
         for b in range(self.batch_size):
             stim = stimuli[b]

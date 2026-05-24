@@ -10,6 +10,10 @@ __pycache__/
 outputs/models/
 outputs/results/
 
+#Weights and logs
+checkpoints/
+
+
 # Mac
 .DS_Store
 

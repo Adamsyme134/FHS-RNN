@@ -2,6 +2,8 @@ from configs import SEED, MODEL
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
+import math
 
 
 class ScratchRNN(nn.Module):
@@ -37,7 +39,7 @@ class ScratchRNN(nn.Module):
             
          
             #calculate new hidden state, using tanh as before
-            h = torch.tanh(
+            h = torch.relu(
                 xt @ self.Wxh.t() + 
                 h @ self.Whh.t() +
                 self.bh 
@@ -103,3 +105,105 @@ class ScratchRNNnumpy():
         hs = np.stack(hs, axis =1)
         return ys, hs
 
+#"Prefrontal cortex" of the model
+class CustomRNN(nn.Module): #Takes input seq + Hidden state -> new hidden states
+    def __init__(self, input_size=3, hidden_size=64, num_actions=2):
+        super(CustomRNN, self).__init__() #initialises nn.Module
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+
+        #Define weights and biases
+        self.W_xh = nn.Parameter(torch.Tensor(hidden_size, input_size))
+        self.W_hh = nn.Parameter(torch.Tensor(hidden_size, hidden_size))
+        self.b_xh = nn.Parameter(torch.Tensor(hidden_size))
+        self.b_hh = nn.Parameter(torch.Tensor(hidden_size))
+
+        #Initialise the weights before use
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        #Initialises weights to small random values (mimicing pytorch's default uniform distribution)
+        stdv = 1.0 / math.sqrt(self.hidden_size)
+        for weight in self.parameters():
+            nn.init.uniform_(weight, -stdv, stdv)
+
+    def forward(self, x, h_0=None):
+        # x expected shape: (batch_size, seq_len, input_size)
+        batch_size, seq_len, _ = x.size()
+
+        #initialise first hidden state h_0 with zeros if not provided
+        if h_0 is None:
+            h_t = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        else:
+            h_t = h_0
+
+        hidden_states = []
+
+        #Unroll the RNN across time
+        for t in range(seq_len):
+            x_t = x[:, t, :] #get current timestep input
+
+            h_t = torch.relu(
+                x_t @ self.W_xh.T + self.b_xh + 
+                h_t @ self.W_hh.T + self.b_hh
+            )
+
+            hidden_states.append(h_t.unsqueeze(1))
+    
+        #return stacked hidden states and final hidden state
+        return torch.cat(hidden_states, dim=1), h_t
+
+
+#"Motor cortex/BG" of the model
+class ActorCriticRNN(nn.Module): #Map hidden state to immediate physical action (lick/no lick)
+
+    def __init__(self, input_size=3, hidden_size=64, num_actions=2):
+        super(ActorCriticRNN, self).__init__()
+        
+        self.hidden_size = hidden_size
+        self.rnn = CustomRNN(input_size, hidden_size)
+        
+        # The Actor and Critic heads (final output layers)
+        self.actor_head = nn.Linear(hidden_size, num_actions) #Outputs policy (lick/ no lick)
+        self.critic_head = nn.Linear(hidden_size, 1) #Outputs value estimate
+
+    def forward(self, x):
+        #Pass the sequence through custom RNN
+        hidden_states, _ = self.rnn(x)
+        
+        #Actor Head
+        action_logits = self.actor_head(hidden_states)
+        action_probs = torch.softmax(action_logits, dim=-1)
+        
+        #Critic Head
+        values = self.critic_head(hidden_states).squeeze(-1)
+        
+        return action_probs, values
+    
+class RLModelWrapper(nn.Module):
+    def __init__(self, rl_model):
+        super().__init__()
+        self.rl_model = rl_model
+        # Match hidden size attributes for external references
+        self.hidden_size = rl_model.hidden_size
+
+    def forward(self, inputs):
+        # Drop the 4th tracking channel if input comes from the SL batch generator
+        if inputs.shape[-1] == 4:
+            inputs = inputs[..., :3]
+            
+        action_probs, _ = self.rl_model(inputs)
+        # Map Action 1 probability (Lick) to 'ys' to mimic the analog lick-rate output
+        ys = action_probs[:, :, 1:2] 
+        # Extract the hidden states directly from the internal custom RNN
+        hs, _ = self.rl_model.rnn(inputs)
+        return ys, hs
+
+    def load_state_dict(self, state_dict):
+        self.rl_model.load_state_dict(state_dict)
+
+    def eval(self):
+        self.rl_model.eval()
+
+    def train(self):
+        self.rl_model.train()

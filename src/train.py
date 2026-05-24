@@ -1,4 +1,4 @@
-from models import ScratchRNN, ScratchRNNnumpy
+from models import *
 from task import *
 import numpy as np
 from configs import TRAINING, TASK
@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 import os
 import torch.optim.lr_scheduler as lr_scheduler
-
+from torch.distributions import Categorical
 
 
 def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2, probe=False):
@@ -55,7 +55,7 @@ def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1
 
         for b in range(batches_per_epoch):
             # Get the batch data
-            padded_inputs, padded_targets, lengths, mask = epoch_data[b]
+            padded_inputs, padded_targets, lengths, mask,cues = epoch_data[b]
             
             padded_inputs = padded_inputs.to(device)
             padded_targets = padded_targets.to(device)
@@ -121,6 +121,92 @@ def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1
 
     return rnn, loss_history, live_performance
 
+def compute_returns(rewards, gamma=0.99): 
+    #calculates the discounted cumulative returns for the episode
+    #Gamma=discount factor (prioritise near-term outcomes)
+    #How much total future reward followed from this state/action
+    returns = torch.zeros_like(rewards)
+    running_return = torch.zeros(rewards.size(0), device=rewards.device)
+    
+    # Iterate backwards through time to calculate discounted returns
+    for t in reversed(range(rewards.size(1))):
+        running_return = rewards[:, t] + gamma * running_return
+        returns[:, t] = running_return
+        
+    return returns    
+
+def train_rl_model(num_epochs=10000, batch_size=32, seq_len=15, lr=1e-3, gamma=0.95):
+    # Initialize environment and model
+    env = RLTask(batch_size=batch_size, seq_len=seq_len)
+    model = ActorCriticRNN(input_size=3, hidden_size=64, num_actions=2)
+    optimizer = optim.Adam(model.parameters(), lr=lr)    
+
+    loss_history = []
+    live_performance = {'A': [], 'B': [], 'C': []}
+    reversal_epoch = TRAINING.get("reversal_epoch", num_epochs // 2) #Defaults to halfway if none provided
+
+    for epoch in range(num_epochs):
+        #Get trial data
+        inputs, stimuli = env.get_batch()
+        action_probs, values = model(inputs) #Forward pass through the model
+
+        dist = Categorical(action_probs)
+        actions = dist.sample() # Shape = (batch_size, seq_len)
+        log_probs = dist.log_prob(actions)
+
+        rewards = env.evaluate_sequence(stimuli, actions)
+        returns = compute_returns(rewards, gamma) #Calculates discounted returns
+
+        advantage = returns - values.detach() #Outcome better or worse than expected?
+        
+        actor_loss = -(log_probs * advantage).mean() #Push probabilities up for good actions
+        critic_loss = F.mse_loss(values, returns)
+
+        # Entropy Bonus: Encourages exploration by penalizing absolute certainty
+        entropy = dist.entropy().mean()
+        entropy_coef = 0.01
+        
+        total_loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
+        #Backprop
+        optimizer.zero_grad()
+        total_loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) #Gradient clipping to prevent explosion
+        optimizer.step()
+
+        loss_history.append(total_loss.item())
+   
+        # Identify trial conditions by checking active channels across sequence length
+        cue_A_mask = inputs[:, :, 0].sum(dim=1) > 0
+        cue_B_mask = inputs[:, :, 1].sum(dim=1) > 0
+        cue_C_mask = inputs[:, :, 2].sum(dim=1) > 0
+
+        t_anticip = seq_len - 2  # Anticipation window step
+        lick_prob = action_probs[:, t_anticip, 1] # Probability of choosing Lick (Action 1)
+
+        live_performance['A'].append(lick_prob[cue_A_mask].mean().item() if cue_A_mask.any() else 0.0)
+        live_performance['B'].append(lick_prob[cue_B_mask].mean().item() if cue_B_mask.any() else 0.0)
+        live_performance['C'].append(lick_prob[cue_C_mask].mean().item() if cue_C_mask.any() else 0.0)
+        
+        # --- SAVING WEIGHTS AT CHECKPOINTS ---
+        save_dir = "checkpoints"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        if epoch == (reversal_epoch - 1):
+            torch.save(model.state_dict(), os.path.join(save_dir, "weights_baseline.pth"))
+        elif epoch == (reversal_epoch + 5):
+            torch.save(model.state_dict(), os.path.join(save_dir, "weights_early_reversal.pth"))
+        elif epoch == (num_epochs - 1):
+            torch.save(model.state_dict(), os.path.join(save_dir, "weights_final_reversal.pth"))
+            
+        if epoch % 2 == 0:
+            torch.save(model.state_dict(), os.path.join(save_dir, f"weights_epoch_{epoch}.pth"))
+
+        if (epoch + 1) % 100 == 0:
+            print(f"Epoch {epoch+1:04d} | Total Loss: {total_loss.item():.4f} | Avg Lick Prob A: {live_performance['A'][-1]:.2f}")
+
+    torch.save(live_performance, os.path.join("checkpoints", "live_performance.pt"))
+    return model, loss_history, live_performance
 
 def train_model_numpy(rnn, lr, epochs, batches_per_epoch, batch_size): 
     REVERSED = TASK["reversed"]
