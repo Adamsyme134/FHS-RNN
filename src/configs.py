@@ -2,7 +2,7 @@ SEED = 42
 
 TASK = {
     "stimulus_duration": 10,
-    "reward_duration": 1,
+    "reward_duration": 5,
     "delay_duration": 0, #20,
     "baseline_duration": 0,
     "reward_probs": {
@@ -20,7 +20,7 @@ MODEL = {
 }
 
 TRAINING = {
-    "lr": 1e-3,
+    "lr": 3e-4,
     "epochs": 400,
     "batches_per_epoch": 50,
     "batch_size": 32,

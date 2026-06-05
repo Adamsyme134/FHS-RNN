@@ -122,10 +122,11 @@ class CustomRNN(nn.Module): #Takes input seq + Hidden state -> new hidden states
         self.reset_parameters()
 
     def reset_parameters(self):
-        #Initialises weights to small random values (mimicing pytorch's default uniform distribution)
-        stdv = 1.0 / math.sqrt(self.hidden_size)
-        for weight in self.parameters():
-            nn.init.uniform_(weight, -stdv, stdv)
+#        Xavier for inputs, Orthogonal for recurrent connections to sustain delay memory
+        nn.init.xavier_uniform_(self.W_xh)
+        nn.init.orthogonal_(self.W_hh)
+        nn.init.zeros_(self.b_xh)
+        nn.init.zeros_(self.b_hh)
 
     def forward(self, x, h_0=None):
         # x expected shape: (batch_size, seq_len, input_size)
@@ -143,7 +144,7 @@ class CustomRNN(nn.Module): #Takes input seq + Hidden state -> new hidden states
         for t in range(seq_len):
             x_t = x[:, t, :] #get current timestep input
 
-            h_t = torch.relu(
+            h_t = torch.tanh(
                 x_t @ self.W_xh.T + self.b_xh + 
                 h_t @ self.W_hh.T + self.b_hh
             )
@@ -163,18 +164,25 @@ class ActorCriticRNN(nn.Module): #Map hidden state to immediate physical action 
         self.hidden_size = hidden_size
         self.rnn = CustomRNN(input_size, hidden_size)
         
+
         # The Actor and Critic heads (final output layers)
         self.actor_head = nn.Linear(hidden_size, num_actions) #Outputs policy (lick/ no lick)
+        
         self.critic_head = nn.Linear(hidden_size, 1) #Outputs value estimate
-
+        #Force 50/50 initial exploration
+        nn.init.orthogonal_(self.actor_head.weight, gain=0.01)
+        nn.init.zeros_(self.actor_head.bias) 
     def forward(self, x):
         #Pass the sequence through custom RNN
         hidden_states, _ = self.rnn(x)
         
         #Actor Head
         action_logits = self.actor_head(hidden_states)
-        action_probs = torch.softmax(action_logits, dim=-1)
+        raw_action_probs = torch.softmax(action_logits, dim=-1)
         
+        epsilon = 0.05 
+        num_actions = 2
+        action_probs = (1 - epsilon) * raw_action_probs + (epsilon / num_actions)
         #Critic Head
         values = self.critic_head(hidden_states).squeeze(-1)
         
@@ -199,8 +207,8 @@ class RLModelWrapper(nn.Module):
         hs, _ = self.rl_model.rnn(inputs)
         return ys, hs
 
-    def load_state_dict(self, state_dict):
-        self.rl_model.load_state_dict(state_dict)
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        return self.rl_model.load_state_dict(state_dict, strict=strict, assign=assign)
 
     def eval(self):
         self.rl_model.eval()

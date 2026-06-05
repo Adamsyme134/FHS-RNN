@@ -30,8 +30,8 @@ def add_guassian_noise(inputs, std_dev=0.1):
 
     return noisy_inputs
 
-def generate_trial(cue_choice, reward_choice, trial_params, SIGMA=1.2, is_reversed = False, noise=True):
-
+def generate_trial(cue_choice, reward_choice, trial_params, SIGMA=1.2, is_reversed = False, noise=True, noise_stdev=0.1):
+    noise_stdev= 0.1
     stimulus_duration = parse_duration(trial_params["stimulus_duration"])
     delay_duration = parse_duration(trial_params["delay_duration"])
     reward_duration = parse_duration(trial_params["reward_duration"])
@@ -74,7 +74,7 @@ def generate_trial(cue_choice, reward_choice, trial_params, SIGMA=1.2, is_revers
     targets[T-1,0] = rewarded #gives the reward (if randomly selected) 
 
     if noise:
-        inputs = add_guassian_noise(inputs)
+        inputs = add_guassian_noise(inputs, std_dev=noise_stdev)
     
     return inputs,targets
 
@@ -85,7 +85,8 @@ def generate_batch(*,
     rewards=["RANDOM"],
     is_reversed=False,
     SIGMA=1.5,
-    noise=True):
+    noise=True,
+    noise_stdev=0.1):
     if cues is not None:
         cues = cues
         batch_size = len(cues)
@@ -111,7 +112,9 @@ def generate_batch(*,
             reward_choice=reward_choice,
             trial_params=trial_params,
             SIGMA=SIGMA,
-            is_reversed=is_reversed
+            is_reversed=is_reversed,
+            noise=noise,
+            noise_stdev=noise_stdev
         )
         inputs = torch.tensor(inputs, dtype = torch.float32)
         targets = torch.tensor(targets, dtype = torch.float32)
@@ -183,38 +186,78 @@ def generate_full_dataset(epochs, trial_params, trial_counts, batches_per_epoch,
     return dataset
 
 class RLTask:
-    def __init__(self, batch_size=32, seq_len=15):
+    def __init__(
+        self,
+        batch_size=32,
+        stimulus_duration=10,
+        delay_duration=5,
+        reward_duration=5
+    ):
         self.batch_size = batch_size
-        self.seq_len = seq_len
+        
         # Reward probabilities for Stimuli A, B, C (indices 0, 1, 2)
         self.reward_probs = {0: 1.0, 1: 0.5, 2: 0.0} #Keep as this? 0.8/0.2?
-
-        # Timing parameters (time steps) (PARAMETERISE)
-        self.stim_start = 3
-        self.stim_end = 7
-        self.response_time = 14 # When the model must make its choice
-
         # Reward and penalty values
         self.reward_value = 1.0
-        self.lick_cost = -0.1
-    
-    def get_batch(self):
-        # Randomly choose a stimulus (0, 1, or 2) for each sequence in the batch
-        stimuli = np.random.choice([0, 1, 2], size=self.batch_size) #Update later
+        self.lick_cost = -0.01
 
-        inputs = torch.zeros((self.batch_size, self.seq_len, 3))
-        stim_one_hot = F.one_hot(torch.tensor(stimuli), num_classes=3).float()
+        self.stimulus_duration = stimulus_duration
+        self.delay_duration = delay_duration
+        self.reward_duration = reward_duration
+
+        self.iti_lengths = np.random.randint(3, 9, size=self.batch_size)
+        self.stim_starts = self.iti_lengths
+        self.stim_ends = self.stim_starts + self.stimulus_duration
+        self.reward_starts = self.stim_ends
+        self.reward_ends = self.reward_starts + self.reward_duration
+        self.seq_lens = self.reward_ends
+        self.max_seq_len = int(np.max(self.seq_lens))
+
+    
+    def get_batch(self, stimuli=None, return_events=False):
+
+        self.iti_lengths = np.random.randint(3, 9, size=self.batch_size) 
+        self.stim_starts = self.iti_lengths
+        self.stim_ends = self.stim_starts + self.stimulus_duration
+        self.reward_starts = self.stim_ends
+        self.reward_ends = self.reward_starts + self.reward_duration
+        self.seq_lens = self.reward_ends
+        self.max_seq_len = int(np.max(self.seq_lens))
+
+        #Randomly choose stimuli
+        if stimuli is None:
+            stimuli = np.random.choice([0, 1, 2], size=self.batch_size)
+
+        # Create the zeroed input tensor using the max sequence length
+        inputs = torch.zeros((self.batch_size, self.max_seq_len, 3))
         
-        #Add the stimulus into the input tensor
-        for t in range(self.stim_start, self.stim_end):
-            inputs[:, t, :] = stim_one_hot
+        #Populate the stimulus into the input tensor trial-by-trial
+        for b in range(self.batch_size):
+            stim_class = stimuli[b]
+            start = self.stim_starts[b]
+            end = self.stim_ends[b]
+            
+            # Apply 1.0 only during this trial's specific stimulus window
+            inputs[b, start:end, stim_class] = 1.0
+
+        if return_events:
+            events = []
+            for b in range(self.batch_size):
+                events.append({
+                    "stim_on": int(self.stim_starts[b]),
+                    "stim_last": int(self.stim_ends[b] - 1),
+                    "reward_on": int(self.reward_starts[b]),
+                    "reward_last": int(self.reward_ends[b] - 1),
+                    "trial_end": int(self.seq_lens[b] - 1),
+                })
+            return inputs, stimuli, torch.tensor(self.seq_lens), events
 
         return inputs, stimuli
 
     def evaluate_sequence(self, stimuli, actions):
         #Evaluates model's action at every time step
         #Currently, action-1 is Go, action=0 is no go
-        rewards = torch.zeros((self.batch_size, self.seq_len))
+        rewards = torch.zeros((self.batch_size, self.max_seq_len))
 
         for b in range(self.batch_size):
             stim = stimuli[b]
@@ -223,17 +266,28 @@ class RLTask:
             # Determine if this specific trial actually yields reward
             trial_rewarded = np.random.binomial(1, prob) #Along binomial -- Normal?
             reward_harvested = False
-            
-            for t in range(self.seq_len):
+
+            #Timings for this specific trial
+            actual_len = self.seq_lens[b]
+            trial_stim_end = self.stim_ends[b]
+
+            for t in range(actual_len):
+                
                 if actions[b, t] == 1: # The model chose to lick
-                    
-                    # Check if the lick is valid for a reward (is there a reward, has it already been licked)
-                    if t >= self.stim_end and trial_rewarded and not reward_harvested:
-                        rewards[b, t] = self.reward_value
-                        reward_harvested = True # Consume the reward
+                    if t >= trial_stim_end: #In outcome window
+                        # Check if the lick is valid for a reward (is there a reward, has it already been licked)
+                        if trial_rewarded and not reward_harvested:
+                            rewards[b, t] = self.reward_value
+                            reward_harvested = True # Consume the reward
+                       
+                        elif not trial_rewarded:
+                            rewards[b, t] = self.lick_cost # Penalize licking when no reward is present
+                        else:
+                            # No penalty for extra licking in outcome window
+                            rewards[b, t] = 0 #
                     else:
-                        # Licked prematurely, on a non-rewarded trial, or after consuming
+                        # Penalize licking prematurely
                         rewards[b, t] = self.lick_cost
-                        
+                            
         return rewards
 

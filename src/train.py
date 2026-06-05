@@ -10,7 +10,9 @@ import torch.optim.lr_scheduler as lr_scheduler
 from torch.distributions import Categorical
 
 
-def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2, probe=False):
+
+
+def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1.2, probe=False, save_dir="checkpoints"):
 
     #device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     device = torch.device("cpu")
@@ -48,6 +50,7 @@ def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
 
+            optimizer = optim.Adam(rnn.parameters(), lr=lr, weight_decay=1e-4)
             #Restart the scheduler so LR decays from the top again
             scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
 
@@ -65,10 +68,12 @@ def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1
             
             # ys shape: (batch_size, seq_len, output_dim)
             ys, hs = rnn(padded_inputs) #runs rnn.forward 
-    
-            sq_error = criterion(ys, padded_targets) # Calculate element-wise MSE
-            mask_expanded = mask.unsqueeze(-1) # Expand mask to match output dimensions (batch, seq, output_dim)
-            masked_loss = (sq_error * mask_expanded).sum() / mask_expanded.sum() # Apply mask and calculate mean with only real (not padded) data
+            sq_error = criterion(ys, padded_targets)
+
+            importance_weights = torch.where(padded_targets > 0.1, 10.0, 1.0)
+            sq_error = sq_error * importance_weights
+            mask_expanded = mask.unsqueeze(-1) 
+            masked_loss = (sq_error * mask_expanded).sum() / mask_expanded.sum()
             
             masked_loss.backward() #runs all of the calculations for determining gradients
             
@@ -77,7 +82,7 @@ def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1
             optimizer.step() #update the weights and biases
             
             epoch_loss += masked_loss.item()
-
+            t_peak = probe_lengths - 1
             #PROBE THE NETWORK (Every batch)
             if probe:
                 rnn.eval()
@@ -86,7 +91,7 @@ def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1
             
                     # Extract the specific time points for the whole batch at once
                     # Shape: (60)
-                    vals = ys_probe[batch_idx, t_anticipation, 0]
+                    vals = ys_probe[batch_idx, t_peak, 0]
                     
                     # Calculate means natively on the GPU, then pull just the final number (.item()) to CPU
                     live_performance['A'].append(vals[idx_A].mean().item())
@@ -99,10 +104,10 @@ def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1
         loss_history.append(avg_loss)
         print(f"Epoch: {e} | Loss: {avg_loss:.4f}")
 
-        save_dir = "checkpoints"
+        
         os.makedirs(save_dir, exist_ok=True)
         # Save checkpoints 
-        if e == (reversal_epoch - 1): # Baseline once pretty much fully trained on normal stimuli
+        if e == (reversal_epoch - 1) or (e == epochs - 1 and reversal_epoch > epochs): # Baseline once pretty much fully trained on normal stimuli
             torch.save(rnn.state_dict(), os.path.join(save_dir,"weights_baseline.pth"))
             
         elif e == (reversal_epoch + 5): # 5 epochs into the Reversal (Confusion)
@@ -115,11 +120,13 @@ def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1
         
         scheduler.step()
 
-    save_path = os.path.join("checkpoints", "live_performance.pt")
+    save_path = os.path.join(save_dir, "live_performance.pt")
     torch.save(live_performance, save_path)
     print(f"Saved live performance data to {save_path}")   
 
     return rnn, loss_history, live_performance
+
+
 
 def compute_returns(rewards, gamma=0.99): 
     #calculates the discounted cumulative returns for the episode
@@ -135,9 +142,9 @@ def compute_returns(rewards, gamma=0.99):
         
     return returns    
 
-def train_rl_model(num_epochs=10000, batch_size=32, seq_len=15, lr=1e-3, gamma=0.95):
+def train_rl_model(num_epochs=10000, batch_size=32, batches_per_epoch=50, seq_len=15, lr=1e-3, gamma=0.99, entropy_coef=0.01,save_dir="checkpoints"):
     # Initialize environment and model
-    env = RLTask(batch_size=batch_size, seq_len=seq_len)
+    env = RLTask(batch_size=batch_size)
     model = ActorCriticRNN(input_size=3, hidden_size=64, num_actions=2)
     optimizer = optim.Adam(model.parameters(), lr=lr)    
 
@@ -146,53 +153,75 @@ def train_rl_model(num_epochs=10000, batch_size=32, seq_len=15, lr=1e-3, gamma=0
     reversal_epoch = TRAINING.get("reversal_epoch", num_epochs // 2) #Defaults to halfway if none provided
 
     for epoch in range(num_epochs):
-        #Get trial data
-        inputs, stimuli = env.get_batch()
-        action_probs, values = model(inputs) #Forward pass through the model
 
-        dist = Categorical(action_probs)
-        actions = dist.sample() # Shape = (batch_size, seq_len)
-        log_probs = dist.log_prob(actions)
+        # --- REVERSAL ---
+        if epoch == reversal_epoch:
+            print(f"\n--- REVERSING STIMULUS VALUES AT EPOCH {epoch} ---")
+            
+            # A (0) goes from 1.0 -> 0.0, C (2) goes from 0.0 -> 1.0
+            env.reward_probs[0] = 0.0
+            env.reward_probs[2] = 1.0
+            
+            # Reset optimizer learning rate so it has the energy to "unlearn"
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+        for b in range(batches_per_epoch):
+            #Get trial data
+            inputs, stimuli = env.get_batch()
+            action_probs, values = model(inputs) #Forward pass through the model
 
-        rewards = env.evaluate_sequence(stimuli, actions)
-        returns = compute_returns(rewards, gamma) #Calculates discounted returns
+            dist = Categorical(action_probs)
+            actions = dist.sample() # Shape = (batch_size, seq_len)
+            log_probs = dist.log_prob(actions)
 
-        advantage = returns - values.detach() #Outcome better or worse than expected?
-        
-        actor_loss = -(log_probs * advantage).mean() #Push probabilities up for good actions
-        critic_loss = F.mse_loss(values, returns)
+            rewards = env.evaluate_sequence(stimuli, actions)
+            returns = compute_returns(rewards, gamma) # Calculates discounted returns
 
-        # Entropy Bonus: Encourages exploration by penalizing absolute certainty
-        entropy = dist.entropy().mean()
-        entropy_coef = 0.01
-        
-        total_loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
-        #Backprop
-        optimizer.zero_grad()
-        total_loss.backward()
+            # 1. Calculate raw absolute advantages
+            advantage = returns - values.detach() # Shape: (batch_size, seq_len)
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) #Gradient clipping to prevent explosion
-        optimizer.step()
+            actor_loss = -(log_probs * advantage).mean() 
+            critic_loss = F.mse_loss(values, returns)
+            # Entropy Bonus: Encourages exploration by penalizing absolute certainty
+            entropy = dist.entropy().mean()
+            
+            
+            total_loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
+            #Backprop
+            optimizer.zero_grad()
+            total_loss.backward()
 
-        loss_history.append(total_loss.item())
-   
-        # Identify trial conditions by checking active channels across sequence length
-        cue_A_mask = inputs[:, :, 0].sum(dim=1) > 0
-        cue_B_mask = inputs[:, :, 1].sum(dim=1) > 0
-        cue_C_mask = inputs[:, :, 2].sum(dim=1) > 0
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) #Gradient clipping to prevent explosion
+            optimizer.step()
 
-        t_anticip = seq_len - 2  # Anticipation window step
-        lick_prob = action_probs[:, t_anticip, 1] # Probability of choosing Lick (Action 1)
+            loss_history.append(total_loss.item())
+    
+            # Identify trial conditions by checking active channels across sequence length
+            cue_A_mask = inputs[:, :, 0].sum(dim=1) > 0
+            cue_B_mask = inputs[:, :, 1].sum(dim=1) > 0
+            cue_C_mask = inputs[:, :, 2].sum(dim=1) > 0
 
-        live_performance['A'].append(lick_prob[cue_A_mask].mean().item() if cue_A_mask.any() else 0.0)
-        live_performance['B'].append(lick_prob[cue_B_mask].mean().item() if cue_B_mask.any() else 0.0)
-        live_performance['C'].append(lick_prob[cue_C_mask].mean().item() if cue_C_mask.any() else 0.0)
-        
+            batch_values = []
+            
+            for i in range(env.batch_size):
+                start = env.stim_ends[i] # Specific start of outcome window for this trial
+                actual_len = env.seq_lens[i] # Specific end of this trial
+                
+                # Get the MAX probability of licking (Action 1) during the outcome window
+                expected_value = values[i, start].item()
+                batch_values.append(expected_value)
+
+            expected_value_window = torch.tensor(batch_values)
+
+            live_performance['A'].append(expected_value_window[cue_A_mask].mean().item() if cue_A_mask.any() else 0.0)
+            live_performance['B'].append(expected_value_window[cue_B_mask].mean().item() if cue_B_mask.any() else 0.0)
+            live_performance['C'].append(expected_value_window[cue_C_mask].mean().item() if cue_C_mask.any() else 0.0)
         # --- SAVING WEIGHTS AT CHECKPOINTS ---
-        save_dir = "checkpoints"
+        
         os.makedirs(save_dir, exist_ok=True)
         
-        if epoch == (reversal_epoch - 1):
+        if epoch == (reversal_epoch - 1) or (epoch == num_epochs - 1 and reversal_epoch> num_epochs): # Save both the baseline and final reversal checkpoints
             torch.save(model.state_dict(), os.path.join(save_dir, "weights_baseline.pth"))
         elif epoch == (reversal_epoch + 5):
             torch.save(model.state_dict(), os.path.join(save_dir, "weights_early_reversal.pth"))
@@ -202,10 +231,10 @@ def train_rl_model(num_epochs=10000, batch_size=32, seq_len=15, lr=1e-3, gamma=0
         if epoch % 2 == 0:
             torch.save(model.state_dict(), os.path.join(save_dir, f"weights_epoch_{epoch}.pth"))
 
-        if (epoch + 1) % 100 == 0:
-            print(f"Epoch {epoch+1:04d} | Total Loss: {total_loss.item():.4f} | Avg Lick Prob A: {live_performance['A'][-1]:.2f}")
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch+1:04d} | Total Loss: {total_loss.item():.4f} | Lick Probs... A: {live_performance['A'][-1]:.2f}, B: {live_performance['B'][-1]:.2f}, C: {live_performance['C'][-1]:.2f}")
 
-    torch.save(live_performance, os.path.join("checkpoints", "live_performance.pt"))
+    torch.save(live_performance, os.path.join(save_dir, "live_performance.pt"))
     return model, loss_history, live_performance
 
 def train_model_numpy(rnn, lr, epochs, batches_per_epoch, batch_size): 
