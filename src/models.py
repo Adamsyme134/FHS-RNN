@@ -123,8 +123,8 @@ class CustomRNN(nn.Module): #Takes input seq + Hidden state -> new hidden states
 
     def reset_parameters(self):
 #        Xavier for inputs, Orthogonal for recurrent connections to sustain delay memory
-        nn.init.xavier_uniform_(self.W_xh)
-        nn.init.orthogonal_(self.W_hh)
+        nn.init.normal_(self.W_xh, std=0.01)
+        nn.init.normal_(self.W_hh, std=0.01)
         nn.init.zeros_(self.b_xh)
         nn.init.zeros_(self.b_hh)
 
@@ -172,9 +172,9 @@ class ActorCriticRNN(nn.Module): #Map hidden state to immediate physical action 
         #Force 50/50 initial exploration
         nn.init.orthogonal_(self.actor_head.weight, gain=0.01)
         nn.init.zeros_(self.actor_head.bias) 
-    def forward(self, x):
-        #Pass the sequence through custom RNN
-        hidden_states, _ = self.rnn(x)
+    def forward(self, x, h_0=None):
+        #Pass the sequence through custom RNN (including hidden state updates)
+        hidden_states, h_n = self.rnn(x, h_0)
         
         #Actor Head
         action_logits = self.actor_head(hidden_states)
@@ -186,7 +186,8 @@ class ActorCriticRNN(nn.Module): #Map hidden state to immediate physical action 
         #Critic Head
         values = self.critic_head(hidden_states).squeeze(-1)
         
-        return action_probs, values
+        #Returning h_n so we can pass it to the next chunk of time
+        return action_probs, values, h_n
     
 class RLModelWrapper(nn.Module):
     def __init__(self, rl_model):
@@ -200,7 +201,7 @@ class RLModelWrapper(nn.Module):
         if inputs.shape[-1] == 4:
             inputs = inputs[..., :3]
             
-        action_probs, _ = self.rl_model(inputs)
+        action_probs, _, _ = self.rl_model(inputs)
         # Map Action 1 probability (Lick) to 'ys' to mimic the analog lick-rate output
         ys = action_probs[:, :, 1:2] 
         # Extract the hidden states directly from the internal custom RNN

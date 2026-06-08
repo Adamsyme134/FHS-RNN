@@ -107,15 +107,12 @@ def run_hyperparameter_search():
     return df_results
 
 def run_rl_hyperparameter_search():
-    """
-    Executes a grid search over RL-specific hyperparameters and calculates 
-    the convergence speed (epochs required to learn the task).
-    """
-    # 1. Define the search space
     hyperparameter_grid = {
-        'learning_rate': [1e-3],# 5e-4, 1e-4], 
-        'gamma': [0.5, 0.9, 0.99],          # Temporal discount factor
-        'entropy_coef': [0.001, 0.01, 0.05] # Exploration vs Exploitation
+        'gamma': [0.95,0.97,0.99,1], #[0.75, 0.8, 0.85, 0.9, 0.95],          
+        'bptt_horizon': [30, 40,50,60],#[30,40,50,60],       
+        'learning_rate': [1e-3], 
+        'entropy_coef': [0.01], 
+        'critic_coef': [2.0]          
     }
     
     epochs = TRAINING.get("epochs", 2000)
@@ -132,42 +129,60 @@ def run_rl_hyperparameter_search():
         print(f"\n--- Running RL Experiment {i+1}/{len(experiments)} ---")
         print(f"Parameters: {params}")
 
-        # Unique save directory so checkpoints don't overwrite each other
-        run_save_dir = f"checkpoints/rl_search_{i}"
+        run_save_dir = f"checkpoints/rl_search_bptt_gamma_{i}"
         os.makedirs(run_save_dir, exist_ok=True)
 
-        # 2. Train the model
+        # --- NEW: Calculate exact theoretical targets for this specific Gamma ---
+        gamma = params["gamma"]
+        
+        
+        stim_dur = TASK.get("stimulus_duration", 10)
+        delay_dur = TASK.get("delay_duration", 0)
+
+        distances = np.arange(delay_dur + 1, delay_dur + stim_dur + 1) 
+        
+        avg_discount_factor = np.mean(gamma ** distances)
+
+        target_a = 1.0 * avg_discount_factor
+        target_b = 0.5 * avg_discount_factor
+        target_c = 0.0 * avg_discount_factor # Optimal action is to not lick, avoiding the -0.01 penalty
+        
+        print(f"Theoretical Value Targets -> A: {target_a:.3f}, B: {target_b:.3f}, C: {target_c:.3f}")
+
         model, loss_history, live_performance = train_rl_model(
-            num_epochs=epochs,
+            total_timesteps=(epochs * 1000), 
+            bptt_horizon=params["bptt_horizon"], 
             batch_size=batch_size,
             batches_per_epoch=batches_per_epoch,
             lr=params["learning_rate"],
             gamma=params["gamma"],
             entropy_coef=params["entropy_coef"],
-            save_dir=run_save_dir
+            save_dir=run_save_dir,
+            critic_coef=params["critic_coef"]
         )
 
-        # 3. Calculate Point of Convergence
-        # We define convergence as the Expected Value (Critic) reliably hitting 
-        # within 15% of the target values (1.0, 0.5, 0.0) for 5 consecutive epochs.
-        tolerance = 0.1
+        # --- NEW: Exact Value Convergence Logic ---
         convergence_epoch = -1
-        
         total_tracked_epochs = len(live_performance['A'])
         
+        # Determine tolerance dynamically based on the scale of Gamma to prevent impossible standards
+        # (e.g., if target_a is 0.1, a 0.05 tolerance is huge. If it's 1.0, 0.05 is strict)
+        tolerance = max(0.02, target_a * 0.1) 
+
         for e in range(total_tracked_epochs):
-            a_conv = abs(live_performance['A'][e] - 1.0) < tolerance
-            b_conv = abs(live_performance['B'][e] - 0.5) < tolerance
-            c_conv = abs(live_performance['C'][e] - 0.0) < tolerance
+            # Check if all predictions are within the required margin of the true mathematical target
+            a_conv = abs(live_performance['A'][e] - target_a) < tolerance
+            b_conv = abs(live_performance['B'][e] - target_b) < tolerance
+            c_conv = abs(live_performance['C'][e] - target_c) < tolerance
             
             if a_conv and b_conv and c_conv:
-                # Check for stability over the next 5 epochs
+                # Prove it wasn't a fluke by checking stability over the next 5 epochs
                 if e + 5 < total_tracked_epochs:
                     stable = True
                     for check_e in range(e, e + 5):
-                        if not (abs(live_performance['A'][check_e] - 1.0) < tolerance and
-                                abs(live_performance['B'][check_e] - 0.5) < tolerance and
-                                abs(live_performance['C'][check_e] - 0.0) < tolerance):
+                        if not (abs(live_performance['A'][check_e] - target_a) < tolerance and
+                                abs(live_performance['B'][check_e] - target_b) < tolerance and
+                                abs(live_performance['C'][check_e] - target_c) < tolerance):
                             stable = False
                             break
                     
@@ -175,53 +190,30 @@ def run_rl_hyperparameter_search():
                         convergence_epoch = e
                         break
 
-        # 4. Save metrics
         run_data = params.copy()
         run_data['final_loss'] = np.mean(loss_history[-10:]) if loss_history else float('inf')
         run_data['convergence_epoch'] = convergence_epoch if convergence_epoch != -1 else "Did Not Converge"
-        run_data['total_timesteps_to_converge'] = (convergence_epoch * batches_per_epoch * batch_size) if convergence_epoch != -1 else "N/A"
         
         all_results.append(run_data)
 
-    # 5. Output Results
     df_results = pd.DataFrame(all_results)
-    
     print("\n==========================================")
-    print("RL Hyperparameter Search Complete")
-    
-    # Sort by fastest convergence (ignoring those that didn't converge)
-    converged_df = df_results[df_results['convergence_epoch'] != "Did Not Converge"].copy()
-    if not converged_df.empty:
-        converged_df = converged_df.sort_values(by='convergence_epoch')
-        best_run = converged_df.iloc[0]
-        print(f"Fastest Convergence: Epoch {best_run['convergence_epoch']}")
-        print(f"Best Parameters: LR={best_run['learning_rate']}, Gamma={best_run['gamma']}, Entropy={best_run['entropy_coef']}")
-    else:
-        print("No combinations successfully converged within the epoch limit.")
-        
+    print("RL BPTT/Gamma Search Complete")
     return df_results
 
 def extract_hidden_states(model, trial_params, num_trials_per_stim=100, is_reversed=False, noise_stdev=0.1):
-
-    #Generates a structured batch and extracts hidden states.
     model.eval()
-    
-    # Create an equal number of A, B, and C trials
     cues = ["A"] * num_trials_per_stim + ["B"] * num_trials_per_stim + ["C"] * num_trials_per_stim
     
     with torch.no_grad():
         inputs, targets, lengths, mask, cues = generate_batch(
-        trial_params=trial_params,    
-        is_reversed=is_reversed,
-        cues=cues,
-        noise_stdev=noise_stdev)
-        
-        # Run forward pass
+            trial_params=trial_params, is_reversed=is_reversed, cues=cues, noise_stdev=noise_stdev
+        )
         ys, hs = model(inputs)
-    
-    return hs, cues, lengths,inputs, targets
+        
+    return hs, cues, lengths, inputs, targets, ys
 
-def extract_hidden_states_rl(model, num_trials_per_stim=100):
+def extract_hidden_states_rl(model, trial_params, num_trials_per_stim=100, is_reversed=False):
     model.eval()
 
     stimuli = np.array(
@@ -230,7 +222,13 @@ def extract_hidden_states_rl(model, num_trials_per_stim=100):
         [2] * num_trials_per_stim
     )
 
-    env = RLTask(batch_size=len(stimuli))
+    env = RLTask(
+        batch_size=len(stimuli),
+        stimulus_duration=trial_params.get("stimulus_duration", 10),
+        delay_duration=trial_params.get("delay_duration", 0),  # This stops the collapse!
+        reward_duration=trial_params.get("reward_duration", 5),
+        is_reversed=is_reversed
+    )
 
     inputs, stimuli, lengths, events = env.get_batch(
         stimuli=stimuli,
@@ -241,132 +239,176 @@ def extract_hidden_states_rl(model, num_trials_per_stim=100):
     cues = [cue_names[s] for s in stimuli]
 
     with torch.no_grad():
-        ys, hs = model(inputs)
+        # BEFORE the stimulus hits, avoiding "cold-start" trajectory hooks.
+        warmup_len = 15
+        warmup_inputs = torch.zeros((inputs.size(0), warmup_len, 3), device=inputs.device)
+        
+        # --- NEW: Add a cooldown tail so the next ITI is captured ---
+        cooldown_len = 3
+        cooldown_inputs = torch.zeros((inputs.size(0), cooldown_len, 3), device=inputs.device)
+        
+        # Concatenate warmup, actual trial, and cooldown ITI
+        padded_inputs = torch.cat([warmup_inputs, inputs, cooldown_inputs], dim=1)
+        
+        ys_padded, hs_padded = model(padded_inputs)
+        
+        # Strip the warmup frames so the extracted states align with the trial
+        hs = hs_padded[:, warmup_len:, :]
+        ys = ys_padded[:, warmup_len:, :]
+    return hs, cues, lengths, inputs, events, ys
 
-    return hs, cues, lengths, inputs, events
-
-def train_stimulus_decoders(model, trial_params, reversed=False, noise_stdev=0.1): #To decode hidden states back into stimulus
-    
-    hs, cues, lengths, inputs, targets =extract_hidden_states(
-        model=model, trial_params=trial_params, is_reversed=reversed, noise_stdev=noise_stdev)
+def train_stimulus_decoders(model, trial_params, reversed=False, noise_stdev=0.1, model_type="sl"): 
+    if model_type == "rl":
+        hs, cues, lengths, inputs, events, ys = extract_hidden_states_rl(model, trial_params, is_reversed=reversed)
+    else:
+        hs, cues, lengths, inputs, targets, ys = extract_hidden_states(model, trial_params, is_reversed=reversed, noise_stdev=noise_stdev)
 
     X_all = hs.cpu().numpy()
     y_all_1d = np.array(cues)
+    inputs_np = inputs.cpu().numpy()
 
-    if torch.is_tensor(inputs):
-        inputs_all = inputs.cpu().numpy()
-    else:
-        inputs_all = np.array(inputs)
-
-    batch_size, sequence_length, hidden_dim = X_all.shape
+    T_stim = trial_params.get("stimulus_duration", 10)
+    T_delay = trial_params.get("delay_duration", 0)
+    T_rew = trial_params.get("reward_duration", 5)
+    
+    aligned_hs = align_trials(X_all, inputs_np, T_pre=3, T_stim=T_stim, T_delay=T_delay, T_rew=T_rew, T_post=15)
+    batch_size, T_total, hidden_dim = aligned_hs.shape
 
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    
-    first_onset = 1000
-    offset_timesteps = []
     per_stimulus_accuracies = {'A': [], 'B': [], 'C': []}
     avg_accuracy = []
     
-    print(f"Training decoders on {inputs_all.shape[0]} trials")
-    for trial in range(inputs_all.shape[0]):
-        stim_mask = np.any(inputs_all[trial, :, :3] == 1, axis=1)  # first 3 input channels
-
-        if np.any(stim_mask):
-            onset = np.argmax(stim_mask)              # first timestep with stimulus
-            if onset<first_onset:
-                first_onset = onset
-            offset = len(stim_mask) - np.argmax(stim_mask[::-1]) - 1  # last timestep with stimulus
+    for t in range(T_total):
+        X_t = aligned_hs[:, t, :]
+        fold_A, fold_B, fold_C = [], [], []
         
-            offset_timesteps.append(offset)
-
-    stimulus_start_timestep = first_onset
-    avg_stimulus_end_timestep = np.mean(offset_timesteps) if offset_timesteps else np.nan
-
-    for t in range(sequence_length):
-        #slice hidden states for all trials at this specific time point
-        X_t = X_all[:, t, :]
-
-        fold_acc_A = []
-        fold_acc_B = []
-        fold_acc_C = []
         for train_idx, test_idx in cv.split(X_t, y_all_1d):
             X_train, X_test = X_t[train_idx], X_t[test_idx]
             y_train, y_test = y_all_1d[train_idx], y_all_1d[test_idx]
             
-            #Train a linear decoder for these hidden states
             decoder = LogisticRegression(max_iter=1000)
             decoder.fit(X_train, y_train)
-            
-            #Evaluate on held-out trials
             y_pred = decoder.predict(X_test)
-           
-            #Per-stimulus accuracy
+            
             cm = confusion_matrix(y_test, y_pred, labels=['A', 'B', 'C'])
-            class_accs = cm.diagonal() / cm.sum(axis=1)
-            fold_acc_A.append(class_accs[0])
-            fold_acc_B.append(class_accs[1])
-            fold_acc_C.append(class_accs[2])    
-        #Average the accuracies for time step T
-        per_stimulus_accuracies['A'].append(np.mean(fold_acc_A))
-        per_stimulus_accuracies['B'].append(np.mean(fold_acc_B))
-        per_stimulus_accuracies['C'].append(np.mean(fold_acc_C))
-
-        avg_accuracy.append(    (
-        np.mean(fold_acc_A) +
-        np.mean(fold_acc_B) +
-        np.mean(fold_acc_C)
-        ) / 3)
+            class_accs = cm.diagonal() / (cm.sum(axis=1) + 1e-8)
+            fold_A.append(class_accs[0])
+            fold_B.append(class_accs[1])
+            fold_C.append(class_accs[2])    
+            
+        per_stimulus_accuracies['A'].append(np.mean(fold_A))
+        per_stimulus_accuracies['B'].append(np.mean(fold_B))
+        per_stimulus_accuracies['C'].append(np.mean(fold_C))
+        avg_accuracy.append((np.mean(fold_A) + np.mean(fold_B) + np.mean(fold_C)) / 3)
     
-    return per_stimulus_accuracies, avg_accuracy, stimulus_start_timestep, avg_stimulus_end_timestep
+    return per_stimulus_accuracies, avg_accuracy, 3, T_stim, T_delay, T_rew, 15
 
-def train_continuous_decoders(model, trial_params, reversed=False, noise_stdev=0.1):
-    hs, cues, lengths, inputs, targets = extract_hidden_states(
-        model=model,
-        trial_params=trial_params,
-        is_reversed=reversed,
-        noise_stdev=noise_stdev
-    )
+def train_continuous_decoders(model, trial_params, reversed=False, noise_stdev=0.1, model_type="sl"):
+    if model_type == "rl":
+        hs, cues, lengths, inputs, events, ys = extract_hidden_states_rl(model, trial_params, is_reversed=reversed)
+    else:
+        hs, cues, lengths, inputs, targets, ys = extract_hidden_states(model, trial_params, is_reversed=reversed, noise_stdev=noise_stdev)
 
     X_all = hs.cpu().numpy()
+    inputs_np = inputs.cpu().numpy()
     
-    # Ensure targets are 2D (batch_size, sequence_length)
-    if targets.dim() == 3:
-        y_all = targets.squeeze(-1).cpu().numpy()
-    else:
-        y_all = targets.cpu().numpy()
+    # Target model's actual outputs instead of ground truth
+    y_all = ys.squeeze(-1).cpu().numpy() if ys.dim() == 3 else ys.cpu().numpy()
         
-    batch_size, sequence_length, hidden_dim = X_all.shape
+    T_stim = trial_params.get("stimulus_duration", 10)
+    T_delay = trial_params.get("delay_duration", 0)
+    T_rew = trial_params.get("reward_duration", 5)
     
-    # Matrix to store every predicted value for every trial
-    predictions = np.zeros((batch_size, sequence_length))
+    aligned_hs = align_trials(X_all, inputs_np, T_pre=3, T_stim=T_stim, T_delay=T_delay, T_rew=T_rew, T_post=15)
+    aligned_ys = align_trials(np.expand_dims(y_all, -1), inputs_np, T_pre=3, T_stim=T_stim, T_delay=T_delay, T_rew=T_rew, T_post=15)
     
-    # Use KFold for continuous regression targets
+    batch_size, T_total, hidden_dim = aligned_hs.shape
+    predictions = np.zeros((batch_size, T_total))
     cv = KFold(n_splits=5, shuffle=True, random_state=42)
     
-    for t in range(sequence_length):
-        X_t = X_all[:, t, :]
-        y_t = y_all[:, t]
+    for t in range(T_total):
+        X_t = aligned_hs[:, t, :]
+        y_t = aligned_ys[:, t]
         
         for train_idx, test_idx in cv.split(X_t, y_t):
             X_train, X_test = X_t[train_idx], X_t[test_idx]
             y_train, y_test = y_t[train_idx], y_t[test_idx]
             
-            # Train linear regressor
             decoder = Ridge(alpha=1.0)
             decoder.fit(X_train, y_train)
-            
-            # Slot the predictions back into the original trial indices
             predictions[test_idx, t] = decoder.predict(X_test)
             
-    # Group the predictions by cue and average them
     cues_array = np.array(cues)
     mean_predictions = {}
-    
     for cue in ['A', 'B', 'C']:
-        # Find all row indices belonging to this specific cue
         cue_indices = np.where(cues_array == cue)[0]
-        # Average those rows across the trial dimension (axis=0)
         mean_predictions[cue] = predictions[cue_indices, :].mean(axis=0)
         
-    return mean_predictions
+    return mean_predictions, 3, T_stim, T_delay, T_rew, 15
 
+# --- New Lick Probability Extractor ---
+def get_aligned_model_outputs(model, trial_params, is_reversed=False, model_type="sl"):
+    """Extracts and averages the direct outputs of the model without decoding."""
+    if model_type == "rl":
+        _, cues, _, inputs, _, ys = extract_hidden_states_rl(model, trial_params, is_reversed=is_reversed)
+    else:
+        _, cues, _, inputs, _, ys = extract_hidden_states(model, trial_params, is_reversed=is_reversed)
+        
+    y_all = ys.squeeze(-1).detach().cpu().numpy() if ys.dim() == 3 else ys.detach().cpu().numpy()
+    inputs_np = inputs.cpu().numpy()
+    
+    T_stim = trial_params.get("stimulus_duration", 10)
+    T_delay = trial_params.get("delay_duration", 0)
+    T_rew = trial_params.get("reward_duration", 5)
+    
+    aligned_ys = align_trials(np.expand_dims(y_all, -1), inputs_np, T_pre=3, T_stim=T_stim, T_delay=T_delay, T_rew=T_rew, T_post=15)
+    
+    cues_array = np.array(cues)
+    mean_outputs = {}
+    for cue in ['A', 'B', 'C']:
+        idx = np.where(cues_array == cue)[0]
+        mean_outputs[cue] = aligned_ys[idx, :].mean(axis=0) if len(idx) > 0 else np.zeros(aligned_ys.shape[1])
+        
+    return mean_outputs, 3, T_stim, T_delay, T_rew, 15
+def align_trials(
+        data,
+        inputs_np,
+        T_pre=3,
+        T_stim=10,
+        T_delay=0,
+        T_rew=5,
+        T_post=15
+):
+    batch_size = data.shape[0]
+    T_total = T_pre + T_stim + T_delay + T_rew + T_post
+    
+    # Check if data is 2D (batch, seq) or 3D (batch, seq, feat)
+    is_3d = len(data.shape) == 3
+    feature_dim = data.shape[-1] if is_3d else 1
+    aligned_data = np.zeros((batch_size, T_total, feature_dim)) if is_3d else np.zeros((batch_size, T_total))
+    
+    for i in range(batch_size):
+        # Find stimulus onset
+        stim_mask = np.any(inputs_np[i, :, :3] > 0.5, axis=1)
+        onset = np.argmax(stim_mask) if np.any(stim_mask) else T_pre
+        
+        start_idx = onset - T_pre
+        end_idx = onset + T_stim + T_delay + T_rew + T_post
+        trial_data = data[i]
+        
+        # Slice and Pad
+        if start_idx < 0:
+            pad = np.tile(trial_data[0], (-start_idx, 1)) if is_3d else np.tile(trial_data[0], -start_idx)
+            slice_part = trial_data[0 : min(len(trial_data), end_idx)]
+            aligned = np.vstack([pad, slice_part]) if is_3d else np.concatenate([pad, slice_part])
+        else:
+            aligned = trial_data[start_idx : min(len(trial_data), end_idx)]
+            
+        if len(aligned) < T_total:
+            pad_len = T_total - len(aligned)
+            pad = np.tile(aligned[-1], (pad_len, 1)) if is_3d else np.tile(aligned[-1], pad_len)
+            aligned = np.vstack([aligned, pad]) if is_3d else np.concatenate([aligned, pad])
+            
+        aligned_data[i] = aligned[:T_total]
+        
+    return aligned_data if is_3d else aligned_data.squeeze()

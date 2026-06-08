@@ -75,7 +75,9 @@ def train_model(rnn, dataset, lr, epochs, batches_per_epoch, batch_size, SIGMA=1
             mask_expanded = mask.unsqueeze(-1) 
             masked_loss = (sq_error * mask_expanded).sum() / mask_expanded.sum()
             
-            masked_loss.backward() #runs all of the calculations for determining gradients
+            masked_loss.backward()
+            optimizer.step()
+             #runs all of the calculations for determining gradients
             
             nn.utils.clip_grad_norm_(rnn.parameters(), max_norm=1.0) #clips gradient to prevent explosion
             
@@ -142,99 +144,176 @@ def compute_returns(rewards, gamma=0.99):
         
     return returns    
 
-def train_rl_model(num_epochs=10000, batch_size=32, batches_per_epoch=50, seq_len=15, lr=1e-3, gamma=0.99, entropy_coef=0.01,save_dir="checkpoints"):
+def compute_returns_continuous(rewards, values, next_value, chunk_cues, is_next_iti, gamma=0.99):
+    returns = torch.zeros_like(rewards)
+    
+    # 1. Sever the chunk boundary if the next chunk starts with an ITI
+    running_return = next_value.detach() * (1.0 - is_next_iti)
+    
+    is_iti = (chunk_cues == -1).float()
+    
+    # Iterate backwards through time to calculate discounted returns
+    for t in reversed(range(rewards.size(1))):
+        running_return = rewards[:, t] + gamma * running_return
+        returns[:, t] = running_return
+        
+        # 2. BIOLOGICAL SEVERING: Wipe the return for the NEXT backward step 
+        # if the CURRENT step is an ITI. This completely isolates trials.
+        running_return = running_return * (1.0 - is_iti[:, t])
+        
+    return returns
+
+def train_rl_model(total_timesteps=100000, bptt_horizon =60, batch_size=32, batches_per_epoch=50, lr=1e-3, gamma=0.99, entropy_coef=0.01,save_dir="checkpoints", critic_coef=2):
     # Initialize environment and model
-    env = RLTask(batch_size=batch_size)
+    env = ContinuousRLTask(
+        batch_size=batch_size, 
+        total_timesteps=total_timesteps,
+        stimulus_duration=TASK.get("stimulus_duration", 10),
+        delay_duration=TASK.get("delay_duration", 0),
+        reward_duration=TASK.get("reward_duration", 5)
+    )
     model = ActorCriticRNN(input_size=3, hidden_size=64, num_actions=2)
+
+    
     optimizer = optim.Adam(model.parameters(), lr=lr)    
 
     loss_history = []
     live_performance = {'A': [], 'B': [], 'C': []}
-    reversal_epoch = TRAINING.get("reversal_epoch", num_epochs // 2) #Defaults to halfway if none provided
-
-    for epoch in range(num_epochs):
-
-        # --- REVERSAL ---
-        if epoch == reversal_epoch:
-            print(f"\n--- REVERSING STIMULUS VALUES AT EPOCH {epoch} ---")
-            
-            # A (0) goes from 1.0 -> 0.0, C (2) goes from 0.0 -> 1.0
-            env.reward_probs[0] = 0.0
-            env.reward_probs[2] = 1.0
-            
-            # Reset optimizer learning rate so it has the energy to "unlearn"
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
-        for b in range(batches_per_epoch):
-            #Get trial data
-            inputs, stimuli = env.get_batch()
-            action_probs, values = model(inputs) #Forward pass through the model
-
-            dist = Categorical(action_probs)
-            actions = dist.sample() # Shape = (batch_size, seq_len)
-            log_probs = dist.log_prob(actions)
-
-            rewards = env.evaluate_sequence(stimuli, actions)
-            returns = compute_returns(rewards, gamma) # Calculates discounted returns
-
-            # 1. Calculate raw absolute advantages
-            advantage = returns - values.detach() # Shape: (batch_size, seq_len)
-            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-
-            actor_loss = -(log_probs * advantage).mean() 
-            critic_loss = F.mse_loss(values, returns)
-            # Entropy Bonus: Encourages exploration by penalizing absolute certainty
-            entropy = dist.entropy().mean()
-            
-            
-            total_loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
-            #Backprop
-            optimizer.zero_grad()
-            total_loss.backward()
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) #Gradient clipping to prevent explosion
-            optimizer.step()
-
-            loss_history.append(total_loss.item())
+    h_t = None # Initialize hidden state outside the loop so it can persist across batches (truncated BPTT)
     
-            # Identify trial conditions by checking active channels across sequence length
-            cue_A_mask = inputs[:, :, 0].sum(dim=1) > 0
-            cue_B_mask = inputs[:, :, 1].sum(dim=1) > 0
-            cue_C_mask = inputs[:, :, 2].sum(dim=1) > 0
+    
+    timesteps_per_epoch = 1000 
+    current_epoch = 0
+    epoch_vals = {'A': [], 'B': [], 'C': []}    
+    
+    
+    # Force the reversal timestep to perfectly match the target epoch
+    reversal_epoch = TRAINING.get("reversal_epoch", 200)
+    reversal_timestep = reversal_epoch * timesteps_per_epoch
+    print(f"Starting Continuous Training: {total_timesteps} total steps, chunked by {bptt_horizon}.")
 
-            batch_values = []
+    for t_start in range(0, total_timesteps, bptt_horizon):
+        if t_start % timesteps_per_epoch == 0:
+            h_t = None # Reset hidden state at epoch boundaries to prevent unintended carryover
+        t_end = min(t_start + bptt_horizon, total_timesteps)
+
+        # Reversal
+        if t_start == reversal_timestep:
+            print(f"\n--- REVERSING STIMULUS VALUES at timestep {t_start} ---")
+
+            # 1. Stimulus A (index 0) goes from 100% -> 0% reward
+            stim_a_mask = (env.trial_cues[:, t_start:] == 0)
+            env.trial_is_rewarded[:, t_start:][stim_a_mask] = False
+
+            # 2. Stimulus C (index 2) goes from 0% -> 100% reward
+            stim_c_mask = (env.trial_cues[:, t_start:] == 2)
+            env.trial_is_rewarded[:, t_start:][stim_c_mask] = True
             
-            for i in range(env.batch_size):
-                start = env.stim_ends[i] # Specific start of outcome window for this trial
-                actual_len = env.seq_lens[i] # Specific end of this trial
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr # Reset LR at reversal
+        
+        chunk_inputs = env.inputs[:, t_start:t_end, :]
+        #Forward pass through the model for this chunk
+        action_probs, values, h_t = model(chunk_inputs, h_0=h_t) # Forward pass through the model for this chunk
+
+        h_t = h_t.detach() # Detach hidden state to prevent backprop through entire history (truncated BPTT)
+
+        # Calculate action log probabilities and sample actions
+        dist = Categorical(action_probs)
+        actions = dist.sample()
+        log_probs = dist.log_prob(actions)
+
+        #evaluate the rewards for the actions taken
+        rewards = env.evaluate_chunk(t_start, t_end, actions)
+
+        chunk_cues = env.trial_cues[:, t_start:t_end]
+        chunk_reward_windows = env.reward_windows[:, t_start:t_end]
+
+        #bootstrap the value of the next state using the critic's estimate (for continuous returns)
+        if t_end < total_timesteps:
+            with torch.no_grad():
+                next_input = env.inputs[:, t_end:t_end + 1, :]
+                _, next_val, _ = model(next_input, h_0=h_t)
+                next_value_scalar = next_val.squeeze(1)
+
+                next_cues = env.trial_cues[:, t_end]
+                is_next_iti = (next_cues == -1).float()
+        else:
+            next_value_scalar = torch.zeros(batch_size)
+            is_next_iti = torch.ones(batch_size) # If we're at the end, treat the "next" state as an ITI to sever returns
+
+        returns = compute_returns_continuous(rewards, values, next_value_scalar, chunk_cues, is_next_iti, gamma)
+            
+        #Calculate losses
+        advantage = returns - values.detach()
+        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-5)
+        advantage = torch.nan_to_num(advantage, nan=0.0, posinf=0.0, neginf=0.0)
+
+        actor_loss = -(log_probs * advantage).mean() # Policy gradient loss (encourage actions that had positive advantage)
+        critic_loss = F.mse_loss(values, returns) # Critic loss (fit value estimates to the computed returns)
+        entropy = dist.entropy().mean() # Entropy bonus (encourage exploration)
+
+        total_loss = actor_loss + critic_coef * critic_loss - entropy_coef * entropy
+
+        # Backpropagation and optimization step
+        optimizer.zero_grad()
+        total_loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        loss_history.append(total_loss.item())
+
+        # Isolate the Critic's predictions specifically during the reward windows
+        for stim_idx, cue_name in enumerate(['A', 'B', 'C']):
+            # Use the logical NOT operator (~) on the reward window
+            mask = chunk_inputs[..., stim_idx] > 0.5
+            
+            if mask.any():
+                epoch_vals[cue_name].append(values[mask].mean().item())
+        
+        #VIRTUAL EPOCH BOUNDARIES for tracking performance and saving checkpoints (since we're not training in discrete epochs, we define our own "epochs" based on timesteps)
+        if (t_start + bptt_horizon) >= (current_epoch + 1) * timesteps_per_epoch:
+            
+            #Average the values for this epoch (fallback to previous if no trials occurred)
+            mean_A = np.mean(epoch_vals['A']) if epoch_vals['A'] else (live_performance['A'][-1] if live_performance['A'] else 0.0)
+            mean_B = np.mean(epoch_vals['B']) if epoch_vals['B'] else (live_performance['B'][-1] if live_performance['B'] else 0.0)
+            mean_C = np.mean(epoch_vals['C']) if epoch_vals['C'] else (live_performance['C'][-1] if live_performance['C'] else 0.0)
+            
+            live_performance['A'].append(mean_A)
+            live_performance['B'].append(mean_B)
+            live_performance['C'].append(mean_C)
+            
+            # Reset accumulators for the next epoch
+            epoch_vals = {'A': [], 'B': [], 'C': []}
+            
+            # Save Checkpoints exactly as plotting.py expects
+            os.makedirs(save_dir, exist_ok=True)
+            if current_epoch % 2 == 0:
+                torch.save(model.state_dict(), os.path.join(save_dir, f"weights_epoch_{current_epoch}.pth"))
+            
+ 
+            reversal_epoch = TRAINING.get("reversal_epoch", 200)
+            if current_epoch == (reversal_epoch - 1):
+                torch.save(model.state_dict(), os.path.join(save_dir, "weights_baseline.pth"))
+            elif current_epoch == (reversal_epoch + 5):
+                torch.save(model.state_dict(), os.path.join(save_dir, "weights_early_reversal.pth"))
+            elif current_epoch == (TRAINING.get("epochs", 400) - 1):
+                torch.save(model.state_dict(), os.path.join(save_dir, "weights_final_reversal.pth"))
+            # Print exactly 10 epochs worth of performance data at a time to avoid overwhelming the console
+            if (current_epoch + 1) % 10 == 0:
+                total_epochs = total_timesteps // timesteps_per_epoch
                 
-                # Get the MAX probability of licking (Action 1) during the outcome window
-                expected_value = values[i, start].item()
-                batch_values.append(expected_value)
+                print(f"[Virtual Epoch {(current_epoch+1):03d}/{total_epochs:03d}] "
+                      f"Timestep {t_end:06d}/{total_timesteps:06d} "
+                      f"| Loss: {total_loss.item():.4f} "
+                      f"| Licks -> A: {mean_A:.2f}, B: {mean_B:.2f}, C: {mean_C:.2f}")
+            current_epoch += 1
+                    # Specific milestone saves for the baseline/reversal plots
 
-            expected_value_window = torch.tensor(batch_values)
-
-            live_performance['A'].append(expected_value_window[cue_A_mask].mean().item() if cue_A_mask.any() else 0.0)
-            live_performance['B'].append(expected_value_window[cue_B_mask].mean().item() if cue_B_mask.any() else 0.0)
-            live_performance['C'].append(expected_value_window[cue_C_mask].mean().item() if cue_C_mask.any() else 0.0)
-        # --- SAVING WEIGHTS AT CHECKPOINTS ---
-        
-        os.makedirs(save_dir, exist_ok=True)
-        
-        if epoch == (reversal_epoch - 1) or (epoch == num_epochs - 1 and reversal_epoch> num_epochs): # Save both the baseline and final reversal checkpoints
-            torch.save(model.state_dict(), os.path.join(save_dir, "weights_baseline.pth"))
-        elif epoch == (reversal_epoch + 5):
-            torch.save(model.state_dict(), os.path.join(save_dir, "weights_early_reversal.pth"))
-        elif epoch == (num_epochs - 1):
-            torch.save(model.state_dict(), os.path.join(save_dir, "weights_final_reversal.pth"))
-            
-        if epoch % 2 == 0:
-            torch.save(model.state_dict(), os.path.join(save_dir, f"weights_epoch_{epoch}.pth"))
-
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1:04d} | Total Loss: {total_loss.item():.4f} | Lick Probs... A: {live_performance['A'][-1]:.2f}, B: {live_performance['B'][-1]:.2f}, C: {live_performance['C'][-1]:.2f}")
-
+    # Save final states
+    
     torch.save(live_performance, os.path.join(save_dir, "live_performance.pt"))
+    
     return model, loss_history, live_performance
 
 def train_model_numpy(rnn, lr, epochs, batches_per_epoch, batch_size): 

@@ -30,11 +30,13 @@ def add_guassian_noise(inputs, std_dev=0.1):
 
     return noisy_inputs
 
-def generate_trial(cue_choice, reward_choice, trial_params, SIGMA=1.2, is_reversed = False, noise=True, noise_stdev=0.1):
-    noise_stdev= 0.1
+def generate_trial(cue_choice, reward_choice, trial_params, SIGMA=1.2, is_reversed=False, noise=True, noise_stdev=0.1):
+    noise_stdev = 0.1
     stimulus_duration = parse_duration(trial_params["stimulus_duration"])
     delay_duration = parse_duration(trial_params["delay_duration"])
     reward_duration = parse_duration(trial_params["reward_duration"])
+    post_iti_duration = 15 # --- ADDED: Explicit post-trial empty time ---
+    
     if not is_reversed:
         reward_probs = trial_params["reward_probs"]
     else:
@@ -45,38 +47,41 @@ def generate_trial(cue_choice, reward_choice, trial_params, SIGMA=1.2, is_revers
     cue_int = {'A': 0, 'B': 1, 'C': 2}[cue]
     expected_value = reward_probs[cue]
 
-    rewarded = int(np.random.rand() < reward_probs[cue]) if reward_choice =="RANDOM" else int(reward_choice) #decides if reqard will be given based on reqard probability
-    iti_length = np.random.randint(3,9) #ITI interval between 3-8ts (upper bound exclusive in 3-9)
-    T = iti_length + stimulus_duration + delay_duration + reward_duration #Total trial length
+    # Decides if reward will be given based on reward probability
+    rewarded = int(np.random.rand() < reward_probs[cue]) if reward_choice == "RANDOM" else int(reward_choice) 
+    iti_length = np.random.randint(3, 9) 
+    
+    # --- ADDED: Total trial length now includes the post-ITI ---
+    T = iti_length + stimulus_duration + delay_duration + reward_duration + post_iti_duration 
 
-    inputs = np.zeros((T,4)) #Creates array of 0 with T rows and 4 columns ([0,0,0,1] etc as above)
-    targets = np.zeros((T,1)) #creates output array
+    inputs = np.zeros((T, 4)) 
+    targets = np.zeros((T, 1)) 
 
-    inputs[iti_length:(iti_length+stimulus_duration) ,cue_int] = 1 #fills the cue period with the correct stimulus channel
-    reward_period = slice(
-        iti_length + stimulus_duration + delay_duration
-    )
-    inputs[(T-reward_duration):T, 3] = rewarded #fills reward period
+    # 1. Fill Stimulus Window
+    inputs[iti_length : (iti_length + stimulus_duration), cue_int] = 1 
+    
+    # 2. Fill Reward Window
+    t_reward_start = iti_length + stimulus_duration + delay_duration
+    t_reward_end = t_reward_start + reward_duration
+    inputs[t_reward_start : t_reward_end, 3] = rewarded 
 
-    #Decide desired licking behaviour
-    anticipation_period = slice(
-        iti_length + stimulus_duration,
-        iti_length + stimulus_duration + delay_duration 
-    )
-
-    #Smooth out just the anticipation period
+    # 3. Create Target Behavior (Licking)
     plateau_target = np.zeros_like(targets)
-    # This starts at the anticipation period and goes all the way to the end of the trial
-    plateau_target[iti_length + stimulus_duration:] = expected_value
+    
+    # Anticipation ramps up during delay and stays high during the reward window
+    plateau_target[iti_length + stimulus_duration : t_reward_end] = expected_value
     ramp_smoothed = gaussian_filter1d(plateau_target, sigma=SIGMA, axis=0)
-    targets[:T-1, 0] = ramp_smoothed[:T-1, 0]
+    
+    targets[:, 0] = ramp_smoothed[:, 0]
 
-    targets[T-1,0] = rewarded #gives the reward (if randomly selected) 
+    # --- CRITICAL FIX: Clamp the post-ITI target to exactly 0.0 ---
+    # This forces the network to completely squash its hidden state to minimize MSE loss
+    targets[t_reward_end:, 0] = 0.0 
 
     if noise:
         inputs = add_guassian_noise(inputs, std_dev=noise_stdev)
     
-    return inputs,targets
+    return inputs, targets
 
 def generate_batch(*,
     trial_params,
@@ -191,12 +196,17 @@ class RLTask:
         batch_size=32,
         stimulus_duration=10,
         delay_duration=5,
-        reward_duration=5
+        reward_duration=5,
+        is_reversed=False
     ):
         self.batch_size = batch_size
         
         # Reward probabilities for Stimuli A, B, C (indices 0, 1, 2)
-        self.reward_probs = {0: 1.0, 1: 0.5, 2: 0.0} #Keep as this? 0.8/0.2?
+        if not is_reversed:
+            self.reward_probs = {0: 1.0, 1: 0.5, 2: 0.0} #Keep as this? 0.8/0.2?
+        else:
+            # Create a temporary reversed dictionary. B stays the same
+            self.reward_probs = {0: 0.0, 1: 0.5, 2: 1.0}
         # Reward and penalty values
         self.reward_value = 1.0
         self.lick_cost = -0.01
@@ -208,7 +218,7 @@ class RLTask:
         self.iti_lengths = np.random.randint(3, 9, size=self.batch_size)
         self.stim_starts = self.iti_lengths
         self.stim_ends = self.stim_starts + self.stimulus_duration
-        self.reward_starts = self.stim_ends
+        self.reward_starts = self.stim_ends + self.delay_duration
         self.reward_ends = self.reward_starts + self.reward_duration
         self.seq_lens = self.reward_ends
         self.max_seq_len = int(np.max(self.seq_lens))
@@ -291,3 +301,94 @@ class RLTask:
                             
         return rewards
 
+class ContinuousRLTask():
+    def __init__(
+            self,
+            batch_size=32,
+            total_timesteps=50000,
+            stimulus_duration=10,
+            delay_duration=0,
+            reward_duration=5,
+        ):
+        self.batch_size = batch_size
+        self.total_timesteps = total_timesteps
+
+        self.reward_probs = {0: 1.0, 1: 0.5, 2: 0.0} #Keep as this? 0.8/0.2?
+        self.reward_value = 1.0
+        self.lick_cost = -0.01
+
+        self.trial_cues = torch.full((self.batch_size,self.total_timesteps), -1, dtype=torch.long) # To track which stimulus is presented in each trial, initialized to -1 (no stimulus)
+
+        self.inputs = torch.zeros((self.batch_size, self.total_timesteps, 3))
+
+        #Tracking for evaluation
+        self.reward_windows = torch.zeros((self.batch_size, self.total_timesteps), dtype=torch.bool)
+        self.trial_is_rewarded = torch.zeros((self.batch_size,self.total_timesteps), dtype=torch.bool)
+
+        #Generate the full sequence of stimuli and rewards for the entire training duration
+        for b in range(self.batch_size):
+            t = 0
+            while t < self.total_timesteps:
+                #ITI WINDOW
+                iti = np.random.randint(3, 9) #ITI interval between 3-8ts (upper bound exclusive in 3-9)
+                t += iti
+                if t >= self.total_timesteps:
+                    break
+                
+                stim_start = t
+                #STIMULUS WINDOW
+                stim_class = np.random.choice([0, 1, 2])
+                will_reward = np.random.binomial(1, self.reward_probs[stim_class])
+
+                stim_end = t + stimulus_duration
+                if stim_end < self.total_timesteps:
+                    self.inputs[b, t:stim_end, stim_class] = 1.0
+                    
+                t = stim_end + delay_duration
+
+                #REWARD WINDOW
+                reward_end = t + reward_duration
+                if reward_end < self.total_timesteps:
+                    self.reward_windows[b, t:reward_end] = True
+                    self.trial_cues[b, stim_start:reward_end] = stim_class # Stretch to reward_end
+                    if will_reward:
+         
+                        self.trial_is_rewarded[b, t:reward_end] = True
+                t = reward_end
+
+        # Track if a reward has been consumed by a specific batch agent in the current window
+        self.reward_consumed = torch.zeros((self.batch_size), dtype=torch.bool) # To track if reward has been consumed in each trial
+    
+    def evaluate_chunk(self, t_start, t_end, actions):
+        chunk_len = t_end - t_start
+        rewards = torch.zeros((self.batch_size, chunk_len), device=actions.device)
+        
+        # Pre-slice the tracking tensors for this chunk
+        windows = self.reward_windows[:, t_start:t_end]
+        is_rewarded = self.trial_is_rewarded[:, t_start:t_end]
+
+        for i in range(chunk_len):
+            t = t_start + i
+            
+            # 1. Reset consumed flag if we stepped OUT of a reward window
+            if t > 0:
+                stepped_out = (~self.reward_windows[:, t]) & self.reward_windows[:, t-1]
+                self.reward_consumed[stepped_out] = False
+                
+            # 2. Masks for the current timestep
+            licked = (actions[:, i] == 1)
+            in_window = windows[:, i]
+            trial_rewarded = is_rewarded[:, i]
+            
+            # 3. Calculate Valid Rewards
+            # (Licked AND In Window AND Trial has Reward AND Not Yet Consumed)
+            valid_reward_mask = licked & in_window & trial_rewarded & (~self.reward_consumed)
+            rewards[valid_reward_mask, i] = self.reward_value
+            self.reward_consumed[valid_reward_mask] = True # Consume it for these specific batch indices
+            
+            # 4. Calculate Penalties
+            # (Licked AND (Not In Window OR (In Window BUT No Reward)))
+            penalty_mask = licked & (~in_window | (in_window & ~trial_rewarded))
+            rewards[penalty_mask, i] = self.lick_cost
+            
+        return rewards

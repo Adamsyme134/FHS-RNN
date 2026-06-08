@@ -1,0 +1,9 @@
+{
+    "run_id": "run_20260607_112306_7d984",
+    "timestamp": "20260607_112306",
+    "lr": 0.001,
+    "epochs": 500,
+    "batches_per_epoch": 50,
+    "batch_size": 32,
+    "reversal_epoch": 300
+}
