@@ -22,6 +22,7 @@ import json
 import seaborn as sns
 from evaluate import *
 from scipy.ndimage import gaussian_filter1d
+from configs import *
 
 #Configurations for plotting
 @dataclass
@@ -819,10 +820,22 @@ def plot_batch_timeline(live_performance, batches_per_epoch, reversal_epoch, run
     # Mark Reversal Point dynamically
     plt.axvline(x=reversal_point, color='black', linestyle='--', linewidth=2.5, label='Reversal Initiated')
     
+    gamma = TRAINING.get("gamma",0.99)
+    delay_duration = TASK.get("delay_duration", 15)
+    stim_duration = TASK.get("stimulus_duration", 10)
+
+    # Average distance to reward from the stimulus window
+    distances = np.arange(delay_duration + 1, delay_duration + stim_duration + 1)
+    avg_discount = np.mean(gamma ** distances)
+
+    target_A = 1.0 * avg_discount
+    target_B = 0.5 * avg_discount
+    target_C = 0.0 * avg_discount
+
     # Target Guidelines
-    plt.axhline(y=1.0, color='gray', linestyle=':', alpha=0.6)
-    plt.axhline(y=0.5, color='gray', linestyle=':', alpha=0.6)
-    plt.axhline(y=0.0, color='gray', linestyle=':', alpha=0.6)
+    plt.axhline(y=target_A, color='blue', linestyle=':', alpha=0.6, label=f'Discounted Target A ({target_A:.2f})')
+    plt.axhline(y=target_B, color='orange', linestyle=':', alpha=0.6, label=f'Discounted Target B ({target_B:.2f})')
+    plt.axhline(y=target_C, color='green', linestyle=':', alpha=0.6)
     
     ax1 = plt.gca()
     ax1.set_xlabel(xlabel)
@@ -833,10 +846,9 @@ def plot_batch_timeline(live_performance, batches_per_epoch, reversal_epoch, run
     valid_vals = all_vals[np.isfinite(all_vals)]
     
     if len(valid_vals) > 0:
-        # Get the 1st and 99th percentiles
-        ymin, ymax = np.percentile(valid_vals, [1, 99])
-        # Add a small buffer, and ensure always show at least the [0, 1] range
-        ax1.set_ylim(min(-0.1, ymin - 0.1), max(1.1, ymax + 0.1))
+        # Set y-limits with a buffer above the highest target or prediction
+        ymax = max(np.percentile(valid_vals, 99), target_A)
+        ax1.set_ylim(min(-0.1, np.min(valid_vals) - 0.1), ymax + 0.15)
 
     
     if not is_epoch_level:
@@ -895,6 +907,78 @@ def add_phase_boundaries(T_pre, T_stim, T_delay, T_rew, T_post=15):
     # ITI Label
     plt.text(T_pre + T_stim + T_delay + T_rew + (T_post/2), y_max*0.95, 'ITI', ha='center', va='top', alpha=0.7)
 
+def plot_phenotype_overlay_timeline(phenotype_data, reversal_epoch, metric_name="Predicted Value", run_dir=None):
+    """Overlays multiple phenotypes on a single batch timeline."""
+    plt.figure(figsize=(12, 6))
+    
+    colors = {'A': 'blue', 'B': 'orange', 'C': 'green'}
+    line_styles = {'Healthy_Baseline': '-', 'PD_Untreated': ':', 'PD_LDOPA': '--'}
+    
+    for pheno_name, perf in phenotype_data.items():
+        style = line_styles.get(pheno_name, '-')
+        x_axis = np.arange(len(perf['A']))
+        
+        for cue in ['A', 'B', 'C']:
+            # Suppress individual labels to keep the legend clean
+            plt.plot(x_axis, perf[cue], color=colors[cue], linestyle=style, 
+                     alpha=0.8, linewidth=1.5, label="_nolegend_")
+                     
+    plt.axvline(x=reversal_epoch, color='black', linestyle='--', linewidth=2.5, label='Reversal Initiated')
+    
+    # Custom Legend
+    from matplotlib.lines import Line2D
+    custom_lines = [
+        Line2D([0], [0], color='black', linestyle='-', lw=2),
+        Line2D([0], [0], color='black', linestyle=':', lw=2),
+        Line2D([0], [0], color='black', linestyle='--', lw=2),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', markersize=8),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='orange', markersize=8),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=8)
+    ]
+    labels = ['Healthy', 'PD Untreated', 'PD L-DOPA', 'Stimulus A', 'Stimulus B', 'Stimulus C']
+    
+    plt.legend(custom_lines, labels, loc='center left', bbox_to_anchor=(1.02, 0.5))
+    plt.title(f"Evolution of {metric_name} - Phenotype Overlay", pad=20)
+    plt.xlabel("Training Epoch")
+    plt.ylabel(metric_name)
+    plt.tight_layout()
+    
+    if run_dir:
+        plt.savefig(Path(run_dir) / f"phenotype_overlay_{metric_name.replace(' ', '_')}.png", dpi=300)
+        plt.close()
+    else:
+        plt.show()
+
+def plot_variance_batch_timeline(summary_stats, reversal_epoch, metric_name="Predicted Value", run_dir=None):
+    """Plots a timeline with shaded standard error regions across multiple runs."""
+    plt.figure(figsize=(12, 6))
+    colors = {'A': 'blue', 'B': 'orange', 'C': 'green'}
+    
+    for cue, stats in summary_stats.items():
+        mean = stats['mean']
+        se = stats['se']
+        times = np.arange(len(mean))
+        color = colors.get(cue, 'black')
+        
+        plt.plot(times, mean, linewidth=2, label=f'Stimulus {cue}', color=color)
+        plt.fill_between(times, mean - se, mean + se, color=color, alpha=0.3)
+
+    plt.axvline(x=reversal_epoch, color='black', linestyle='--', linewidth=2.5, label='Reversal Initiated')
+    
+    plt.title(f"{metric_name} Timeline (Mean ± SE)", pad=20)
+    plt.xlabel("Training Epoch")
+    plt.ylabel(metric_name)
+    plt.legend(loc='center left', bbox_to_anchor=(1.02, 0.5))
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    if run_dir:
+        plt.savefig(Path(run_dir) / f"variance_timeline_{metric_name.replace(' ', '_')}.png", dpi=300)
+        plt.close()
+    else:
+        plt.show()
+
+
 def plot_decoding_stimulus(accuracies_dict, avg_accuracy, T_pre, T_stim, T_delay, T_rew, T_post, reversed=False, run_dir=None):
     plt.figure(figsize=(8, 5))
     colors = {'A': 'crimson', 'B': 'forestgreen', 'C': 'royalblue'}
@@ -923,6 +1007,8 @@ def plot_decoding_stimulus(accuracies_dict, avg_accuracy, T_pre, T_stim, T_delay
         plt.close()
     else:
         plt.show()
+
+
 
 def plot_decoding_trajectories(mean_predictions, T_pre, T_stim, T_delay, T_rew, T_post, reversed=False, run_dir=None):
     plt.figure(figsize=(8, 5))
@@ -1436,11 +1522,12 @@ def plot_all_graphs(train=False, model_type="sl", plots=None, run_dir=None):
 
     if train:
         if model_type == "rl":
+            gamma = TRAINING.get("gamma",0.99)
             virtual_epoch_length = 1000
             total_time = cfg.epochs * virtual_epoch_length
             
-            _, _, live_performance = train_rl_model(
-                total_timesteps=total_time, batch_size=cfg.batch_size, lr=cfg.lr
+            _, _, live_performance, live_actor_performance = train_rl_model(
+                total_timesteps=total_time, batch_size=cfg.batch_size, lr=cfg.lr, gamma=gamma
             )
         else:
             my_trial_counts = {"A": 10, "B": 10, "C": 12}
@@ -1511,4 +1598,4 @@ if __name__ == "__main__":
     current_run_dir = initialize_run_directory() if save == "y" else None
     
     # Run the setup cleanly using the choice string
-    plot_all_graphs(train=True, model_type=model_choice, plots=["baseline"], run_dir=current_run_dir)
+    plot_all_graphs(train=True, model_type=model_choice, plots=["timeline"], run_dir=current_run_dir)

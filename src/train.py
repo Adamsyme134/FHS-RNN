@@ -163,7 +163,18 @@ def compute_returns_continuous(rewards, values, next_value, chunk_cues, is_next_
         
     return returns
 
-def train_rl_model(total_timesteps=100000, bptt_horizon =60, batch_size=32, batches_per_epoch=50, lr=1e-3, gamma=0.99, entropy_coef=0.01,save_dir="checkpoints", critic_coef=2):
+def train_rl_model(
+        total_timesteps=100000,
+        bptt_horizon =60, 
+        batch_size=32, 
+        lr=1e-3, 
+        gamma=0.99, 
+        entropy_coef=0.01,
+        save_dir="checkpoints", 
+        critic_coef=2,
+        alpha_plus=1.0,
+        alpha_minus=1.0):
+    
     # Initialize environment and model
     env = ContinuousRLTask(
         batch_size=batch_size, 
@@ -179,12 +190,14 @@ def train_rl_model(total_timesteps=100000, bptt_horizon =60, batch_size=32, batc
 
     loss_history = []
     live_performance = {'A': [], 'B': [], 'C': []}
+    live_actor_performance = {'A': [], 'B': [], 'C': []}
     h_t = None # Initialize hidden state outside the loop so it can persist across batches (truncated BPTT)
     
     
     timesteps_per_epoch = 1000 
     current_epoch = 0
     epoch_vals = {'A': [], 'B': [], 'C': []}    
+    epoch_actor_vals = {'A': [], 'B': [], 'C': []}
     
     
     # Force the reversal timestep to perfectly match the target epoch
@@ -198,16 +211,16 @@ def train_rl_model(total_timesteps=100000, bptt_horizon =60, batch_size=32, batc
         t_end = min(t_start + bptt_horizon, total_timesteps)
 
         # Reversal
-        if t_start == reversal_timestep:
-            print(f"\n--- REVERSING STIMULUS VALUES at timestep {t_start} ---")
+        if t_start <= reversal_timestep < t_end: 
+            print(f"\n--- REVERSING STIMULUS VALUES at timestep {reversal_timestep} ---")
 
             # 1. Stimulus A (index 0) goes from 100% -> 0% reward
-            stim_a_mask = (env.trial_cues[:, t_start:] == 0)
-            env.trial_is_rewarded[:, t_start:][stim_a_mask] = False
+            stim_a_mask = (env.trial_cues[:, reversal_timestep:] == 0)
+            env.trial_is_rewarded[:, reversal_timestep:][stim_a_mask] = False
 
             # 2. Stimulus C (index 2) goes from 0% -> 100% reward
-            stim_c_mask = (env.trial_cues[:, t_start:] == 2)
-            env.trial_is_rewarded[:, t_start:][stim_c_mask] = True
+            stim_c_mask = (env.trial_cues[:, reversal_timestep:] == 2)
+            env.trial_is_rewarded[:, reversal_timestep:][stim_c_mask] = True
             
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr # Reset LR at reversal
@@ -246,11 +259,18 @@ def train_rl_model(total_timesteps=100000, bptt_horizon =60, batch_size=32, batc
             
         #Calculate losses
         advantage = returns - values.detach()
-        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-5)
-        advantage = torch.nan_to_num(advantage, nan=0.0, posinf=0.0, neginf=0.0)
+        
 
-        actor_loss = -(log_probs * advantage).mean() # Policy gradient loss (encourage actions that had positive advantage)
-        critic_loss = F.mse_loss(values, returns) # Critic loss (fit value estimates to the computed returns)
+        #Inducing disease - split RPE modulation
+        positive_rpe = torch.clamp(advantage, min=0.0) * alpha_plus
+        negative_rpe = torch.clamp(advantage, max=0.0) * alpha_minus
+
+        modulated_advantage = positive_rpe + negative_rpe
+
+        actor_loss = -(log_probs * modulated_advantage).mean() # Policy gradient loss (encourage actions that had positive advantage)
+        critic_target = values.detach() + modulated_advantage
+        
+        critic_loss = F.mse_loss(values, critic_target) # Critic loss (fit value estimates to the computed returns)
         entropy = dist.entropy().mean() # Entropy bonus (encourage exploration)
 
         total_loss = actor_loss + critic_coef * critic_loss - entropy_coef * entropy
@@ -267,9 +287,10 @@ def train_rl_model(total_timesteps=100000, bptt_horizon =60, batch_size=32, batc
         for stim_idx, cue_name in enumerate(['A', 'B', 'C']):
             # Use the logical NOT operator (~) on the reward window
             mask = chunk_inputs[..., stim_idx] > 0.5
-            
+            actor_mask = (chunk_reward_windows == True) & (chunk_cues == stim_idx)
             if mask.any():
                 epoch_vals[cue_name].append(values[mask].mean().item())
+                epoch_actor_vals[cue_name].append(action_probs[:, :, 1][actor_mask].mean().item())
         
         #VIRTUAL EPOCH BOUNDARIES for tracking performance and saving checkpoints (since we're not training in discrete epochs, we define our own "epochs" based on timesteps)
         if (t_start + bptt_horizon) >= (current_epoch + 1) * timesteps_per_epoch:
@@ -282,9 +303,18 @@ def train_rl_model(total_timesteps=100000, bptt_horizon =60, batch_size=32, batc
             live_performance['A'].append(mean_A)
             live_performance['B'].append(mean_B)
             live_performance['C'].append(mean_C)
+
+            act_A = np.mean(epoch_actor_vals['A']) if epoch_actor_vals['A'] else (live_actor_performance['A'][-1] if live_actor_performance['A'] else 0.0)
+            act_B = np.mean(epoch_actor_vals['B']) if epoch_actor_vals['B'] else (live_actor_performance['B'][-1] if live_actor_performance['B'] else 0.0)
+            act_C = np.mean(epoch_actor_vals['C']) if epoch_actor_vals['C'] else (live_actor_performance['C'][-1] if live_actor_performance['C'] else 0.0)
+            
+            live_actor_performance['A'].append(act_A)
+            live_actor_performance['B'].append(act_B)
+            live_actor_performance['C'].append(act_C)
             
             # Reset accumulators for the next epoch
             epoch_vals = {'A': [], 'B': [], 'C': []}
+            epoch_actor_vals = {'A': [], 'B': [], 'C': []}
             
             # Save Checkpoints exactly as plotting.py expects
             os.makedirs(save_dir, exist_ok=True)
@@ -314,7 +344,7 @@ def train_rl_model(total_timesteps=100000, bptt_horizon =60, batch_size=32, batc
     
     torch.save(live_performance, os.path.join(save_dir, "live_performance.pt"))
     
-    return model, loss_history, live_performance
+    return model, loss_history, live_performance, live_actor_performance
 
 def train_model_numpy(rnn, lr, epochs, batches_per_epoch, batch_size): 
     REVERSED = TASK["reversed"]

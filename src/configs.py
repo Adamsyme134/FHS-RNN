@@ -25,5 +25,6 @@ TRAINING = {
     "epochs": 400,#500,
     "batches_per_epoch": 50,
     "batch_size": 32,
-    "reversal_epoch":200#300
+    "reversal_epoch":200,#300\
+    "gamma":0.99
 }
