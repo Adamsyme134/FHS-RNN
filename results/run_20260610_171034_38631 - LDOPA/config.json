@@ -1,0 +1,24 @@
+{
+    "run_id": "run_20260610_171034_38631",
+    "timestamp": "20260610_171034",
+    "lr": 0.001,
+    "epochs": 400,
+    "batches_per_epoch": 50,
+    "batch_size": 32,
+    "reversal_epoch": 200,
+    "gamma": 0.99,
+    "phenotypes": {
+        "Healthy_Baseline": {
+            "alpha_plus": 1.0,
+            "alpha_minus": 1.0
+        },
+        "PD_Untreated": {
+            "alpha_plus": 0.4,
+            "alpha_minus": 1.5
+        },
+        "PD_LDOPA": {
+            "alpha_plus": 1.5,
+            "alpha_minus": 0.1
+        }
+    }
+}

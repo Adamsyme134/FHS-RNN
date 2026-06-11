@@ -949,11 +949,25 @@ def plot_phenotype_overlay_timeline(phenotype_data, reversal_epoch, metric_name=
     else:
         plt.show()
 
-def plot_variance_batch_timeline(summary_stats, reversal_epoch, metric_name="Predicted Value", run_dir=None):
+def plot_variance_batch_timeline(summary_stats, reversal_epoch, metric_name="Predicted Value", run_dir=None, live_performance=None):
     """Plots a timeline with shaded standard error regions across multiple runs."""
     plt.figure(figsize=(12, 6))
     colors = {'A': 'blue', 'B': 'orange', 'C': 'green'}
-    
+
+    gamma = TRAINING.get("gamma", 0.99)
+    delay_duration = TASK.get("delay_duration", 15)
+    stim_duration = TASK.get("stimulus_duration", 10)
+
+    distances = np.arange(delay_duration + 1, delay_duration + stim_duration + 1)
+    avg_discount = np.mean(gamma ** distances)
+
+    c_vals = live_performance['C'] if isinstance(live_performance['C'], list) else summary_stats['C']['mean']
+    penalty_offset = np.mean(c_vals[:reversal_epoch])
+
+    target_A = (1.0 * avg_discount) + penalty_offset
+    target_B = (0.5 * avg_discount) + penalty_offset
+    target_C = penalty_offset
+
     for cue, stats in summary_stats.items():
         mean = stats['mean']
         se = stats['se']
@@ -963,6 +977,11 @@ def plot_variance_batch_timeline(summary_stats, reversal_epoch, metric_name="Pre
         plt.plot(times, mean, linewidth=2, label=f'Stimulus {cue}', color=color)
         plt.fill_between(times, mean - se, mean + se, color=color, alpha=0.3)
 
+
+    plt.axhline(y=target_A, color='blue', linestyle=':', alpha=0.6, label=f'Target A ({target_A:.2f})')
+    plt.axhline(y=target_B, color='orange', linestyle=':', alpha=0.6, label=f'Target B ({target_B:.2f})')
+    plt.axhline(y=target_C, color='green', linestyle=':', alpha=0.6)
+    
     plt.axvline(x=reversal_epoch, color='black', linestyle='--', linewidth=2.5, label='Reversal Initiated')
     
     plt.title(f"{metric_name} Timeline (Mean ± SE)", pad=20)
@@ -1506,7 +1525,7 @@ def plot_trajectories_with_error(summary_stats, avg_stimulus_start=None, avg_sti
     else:
         plt.show()
 
-def plot_all_graphs(train=False, model_type="sl", plots=None, run_dir=None):
+def plot_all_graphs(train=False, model_type="sl", plots=None, run_dir=None, condition = "Healthy_Baseline"):
     cfg = PlotConfig(
         lr=TRAINING["lr"],
         batch_size=TRAINING["batch_size"],
@@ -1521,13 +1540,19 @@ def plot_all_graphs(train=False, model_type="sl", plots=None, run_dir=None):
     plots = set(plots)
 
     if train:
+        PHENOTYPES = TRAINING.get("phenotypes")
         if model_type == "rl":
             gamma = TRAINING.get("gamma",0.99)
             virtual_epoch_length = 1000
             total_time = cfg.epochs * virtual_epoch_length
-            
+
+            alpha_plus = PHENOTYPES[condition]["alpha_plus"]
+            alpha_minus = PHENOTYPES[condition]["alpha_minus"]
             _, _, live_performance, live_actor_performance = train_rl_model(
-                total_timesteps=total_time, batch_size=cfg.batch_size, lr=cfg.lr, gamma=gamma
+                total_timesteps=total_time, batch_size=cfg.batch_size, lr=cfg.lr, gamma=gamma,
+                alpha_plus=alpha_plus,
+                alpha_minus=alpha_minus
+
             )
         else:
             my_trial_counts = {"A": 10, "B": 10, "C": 12}
@@ -1598,4 +1623,4 @@ if __name__ == "__main__":
     current_run_dir = initialize_run_directory() if save == "y" else None
     
     # Run the setup cleanly using the choice string
-    plot_all_graphs(train=True, model_type=model_choice, plots=["timeline"], run_dir=current_run_dir)
+    plot_all_graphs(train=True, model_type=model_choice, plots=["timeline","baseline","final_reversal","decoding"], run_dir=current_run_dir,condition="Healthy_Baseline")

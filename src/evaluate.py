@@ -4,7 +4,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.model_selection import StratifiedKFold, KFold
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import accuracy_score, confusion_matrix
 from task import *  #
 from models import ScratchRNN
@@ -222,6 +224,8 @@ def extract_hidden_states_rl(model, trial_params, num_trials_per_stim=100, is_re
         [2] * num_trials_per_stim
     )
 
+    
+
     env = RLTask(
         batch_size=len(stimuli),
         stimulus_duration=trial_params.get("stimulus_duration", 10),
@@ -243,8 +247,8 @@ def extract_hidden_states_rl(model, trial_params, num_trials_per_stim=100, is_re
         warmup_len = 15
         warmup_inputs = torch.zeros((inputs.size(0), warmup_len, 3), device=inputs.device)
         
-        # --- NEW: Add a cooldown tail so the next ITI is captured ---
-        cooldown_len = 3
+        # dd a cooldown tail so the next ITI is captured 
+        cooldown_len = 25
         cooldown_inputs = torch.zeros((inputs.size(0), cooldown_len, 3), device=inputs.device)
         
         # Concatenate warmup, actual trial, and cooldown ITI
@@ -303,7 +307,7 @@ def train_stimulus_decoders(model, trial_params, reversed=False, noise_stdev=0.1
     
     return per_stimulus_accuracies, avg_accuracy, 3, T_stim, T_delay, T_rew, 15
 
-def train_continuous_decoders(model, trial_params, reversed=False, noise_stdev=0.1, model_type="sl"):
+def train_continuous_decoders(model, trial_params, reversed=False, noise_stdev=0.1, model_type="sl", decoder_type="ridge"):
     if model_type == "rl":
         hs, cues, lengths, inputs, events, ys = extract_hidden_states_rl(model, trial_params, is_reversed=reversed)
     else:
@@ -332,11 +336,21 @@ def train_continuous_decoders(model, trial_params, reversed=False, noise_stdev=0
         
         for train_idx, test_idx in cv.split(X_t, y_t):
             X_train, X_test = X_t[train_idx], X_t[test_idx]
-            y_train, y_test = y_t[train_idx], y_t[test_idx]
+            y_train, y_test = y_t[train_idx].ravel(), y_t[test_idx].ravel()
             
-            decoder = Ridge(alpha=1.0)
+            if decoder_type == "ridge":
+                decoder = Ridge(alpha=1.0)
+            elif decoder_type == "lasso":
+                decoder = Lasso(alpha=0.01) # Small alpha to prevent flattening everything
+            elif decoder_type == "ols":
+                decoder = LinearRegression()
+            elif decoder_type == "rf":
+                decoder = RandomForestRegressor(n_estimators=20, max_depth=3)
+            else:
+                raise ValueError(f"Unknown decoder_type: {decoder_type}")
+            
             decoder.fit(X_train, y_train)
-            predictions[test_idx, t] = decoder.predict(X_test)
+            predictions[test_idx, t] = decoder.predict(X_test).ravel()
             
     cues_array = np.array(cues)
     mean_predictions = {}

@@ -122,7 +122,7 @@ class CustomRNN(nn.Module): #Takes input seq + Hidden state -> new hidden states
         self.reset_parameters()
 
     def reset_parameters(self):
-#        Xavier for inputs, Orthogonal for recurrent connections to sustain delay memory
+#      
         nn.init.normal_(self.W_xh, std=0.01)
         nn.init.normal_(self.W_hh, std=0.01)
         nn.init.zeros_(self.b_xh)
@@ -201,9 +201,9 @@ class RLModelWrapper(nn.Module):
         if inputs.shape[-1] == 4:
             inputs = inputs[..., :3]
             
-        action_probs, _, _ = self.rl_model(inputs)
+        action_probs, values, _ = self.rl_model(inputs)
         # Map Action 1 probability (Lick) to 'ys' to mimic the analog lick-rate output
-        ys = action_probs[:, :, 1:2] 
+        ys = values.unsqueeze(-1)#action_probs[:, :, 1:2] 
         # Extract the hidden states directly from the internal custom RNN
         hs, _ = self.rl_model.rnn(inputs)
         return ys, hs

@@ -26,5 +26,10 @@ TRAINING = {
     "batches_per_epoch": 50,
     "batch_size": 32,
     "reversal_epoch":200,#300\
-    "gamma":0.99
+    "gamma":0.99,
+    "phenotypes": {
+    "Healthy_Baseline": {"alpha_plus": 1.0, "alpha_minus": 1.0},
+    "PD_Untreated": {"alpha_plus": 0.4, "alpha_minus": 1.5},
+    "PD_LDOPA": {"alpha_plus": 1.5, "alpha_minus": 0.1}
+}
 }

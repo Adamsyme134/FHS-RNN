@@ -3,9 +3,11 @@ import shutil
 from pathlib import Path
 import torch
 import time
+import matplotlib.pyplot as plt
 import random
 import numpy as np
 import scipy.stats as stats
+from evaluate import train_continuous_decoders
 from configs import TASK, TRAINING
 from task import generate_full_dataset
 from models import ScratchRNN, RLModelWrapper, ActorCriticRNN
@@ -84,11 +86,7 @@ def run_variance_experiment(num_runs=5, model_type="sl"):
 
 
 # 1. Define the clinical phenotypes based on D1/D2 pathway dynamics
-PHENOTYPES = {
-    "Healthy_Baseline": {"alpha_plus": 1.0, "alpha_minus": 1.0},
-    "PD_Untreated": {"alpha_plus": 0.4, "alpha_minus": 1.5},
-    "PD_LDOPA": {"alpha_plus": 1.5, "alpha_minus": 0.1}
-}
+PHENOTYPES = TRAINING["phenotypes"]
 def run_phenotype_overlays():
     """Trains 1 seed of each phenotype and overlays them."""
     print("\nGenerating Overlays for Critic and Actor...")
@@ -118,6 +116,48 @@ def run_phenotype_overlays():
     plot_phenotype_overlay_timeline(critic_data, TRAINING["reversal_epoch"], metric_name="Critic Value", run_dir=run_dir)
     plot_phenotype_overlay_timeline(actor_data, TRAINING["reversal_epoch"], metric_name="Actor Lick Probability", run_dir=run_dir)
     print("Overlay plotting complete.\n")
+
+def test_decoder_architectures(checkpoint_path, model_type="sl"):
+    # Load your trained network
+    if model_type == "sl":
+        model = ScratchRNN(input_size=4, hidden_size=256, output_size=1)
+    # else setup RL model...
+    elif model_type == "rl":
+        # RL uses 3 inputs (cues only) and a default hidden size of 64
+        base_rl = ActorCriticRNN(input_size=3, hidden_size=64, num_actions=2)
+        model = RLModelWrapper(base_rl)
+    model.load_state_dict(torch.load(checkpoint_path))
+    model.eval()
+    
+    decoders_to_test = ["ols", "ridge", "lasso", "rf"]
+    results = {}
+    
+    for dec in decoders_to_test:
+        print(f"Decoding with {dec.upper()}...")
+        mean_preds, T_pre, T_stim, T_delay, T_rew, T_post = train_continuous_decoders(
+            model, TASK, reversed=False, model_type=model_type, decoder_type=dec
+        )
+        results[dec] = mean_preds
+        
+    # Plotting comparison
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10), sharey=True, sharex=True)
+    axes = axes.flatten()
+    colors = {'A': 'crimson', 'B': 'forestgreen', 'C': 'royalblue'}
+    
+    for i, dec in enumerate(decoders_to_test):
+        ax = axes[i]
+        for cue, trajectory in results[dec].items():
+            ax.plot(trajectory, linewidth=2, label=f'Cue {cue}', color=colors.get(cue, 'black'))
+        
+        ax.set_title(f"Decoder: {dec.upper()}")
+        ax.axvline(x=T_pre, color='k', linestyle=':', alpha=0.5)
+        ax.axvline(x=T_pre + T_stim, color='k', linestyle=':', alpha=0.5)
+        ax.axvline(x=T_pre + T_stim + T_delay, color='k', linestyle=':', alpha=0.5)
+        if i == 0:
+            ax.legend()
+            
+    plt.tight_layout()
+    plt.show()
 
 
 def run_variance_timeline_experiment(num_runs=5, condition_name="Healthy_Baseline"):
@@ -167,16 +207,17 @@ def run_variance_timeline_experiment(num_runs=5, condition_name="Healthy_Baselin
     critic_stats = calc_stats(all_critic_runs)
     actor_stats = calc_stats(all_actor_runs)
     
-    plot_variance_batch_timeline(critic_stats, TRAINING["reversal_epoch"], metric_name="Critic Value", run_dir=run_dir)
-    plot_variance_batch_timeline(actor_stats, TRAINING["reversal_epoch"], metric_name="Actor Lick Probability", run_dir=run_dir)
+    plot_variance_batch_timeline(critic_stats, TRAINING["reversal_epoch"], metric_name="Critic Value", run_dir=run_dir, live_performance=live_critic)
+    plot_variance_batch_timeline(actor_stats, TRAINING["reversal_epoch"], metric_name="Actor Lick Probability", run_dir=run_dir,live_performance=live_critic)
     print(f"Variance plotting complete. Saved to {run_dir}\n")
 
 if __name__ == "__main__":
+    test_decoder_architectures("checkpoints/weights_baseline.pth", model_type="rl")
     # 1. Overlay
     #run_phenotype_overlays()
     
     # 2. SE / Variance tracking (Example: test L-DOPA with 5 seeds)
-    run_variance_timeline_experiment(num_runs=3, condition_name="PD_Untreated")
+    #run_variance_timeline_experiment(num_runs=5, condition_name="PD_LDOPA")
 # if __name__ == "__main__":
     #choice = input("Run variance experiment for SL or RL? (sl/rl): ").lower()
     #run_variance_experiment(num_runs=5, model_type=choice)
