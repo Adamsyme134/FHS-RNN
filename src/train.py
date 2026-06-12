@@ -144,7 +144,16 @@ def compute_returns(rewards, gamma=0.99):
         
     return returns    
 
-def compute_returns_continuous(rewards, values, next_value, chunk_cues, is_next_iti, gamma=0.99):
+@torch.jit.script
+def compute_returns_continuous(
+    rewards: torch.Tensor, 
+    values: torch.Tensor, 
+    next_value: torch.Tensor, 
+    chunk_cues: torch.Tensor, 
+    is_next_iti: torch.Tensor, 
+    gamma: float = 0.99
+) -> torch.Tensor:
+    
     returns = torch.zeros_like(rewards)
     
     # 1. Sever the chunk boundary if the next chunk starts with an ITI
@@ -152,8 +161,11 @@ def compute_returns_continuous(rewards, values, next_value, chunk_cues, is_next_
     
     is_iti = (chunk_cues == -1).float()
     
+    seq_len = rewards.size(1)
+    
     # Iterate backwards through time to calculate discounted returns
-    for t in reversed(range(rewards.size(1))):
+    # JIT compiles this loop into fast C++, removing Python overhead
+    for t in range(seq_len - 1, -1, -1):
         running_return = rewards[:, t] + gamma * running_return
         returns[:, t] = running_return
         
@@ -184,7 +196,7 @@ def train_rl_model(
         reward_duration=TASK.get("reward_duration", 5)
     )
     model = ActorCriticRNN(input_size=3, hidden_size=64, num_actions=2)
-
+    model = torch.compile(model)
     
     optimizer = optim.Adam(model.parameters(), lr=lr)    
 
@@ -260,18 +272,22 @@ def train_rl_model(
         #Calculate losses
         advantage = returns - values.detach()
         
+        norm_adv = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
-        #Inducing disease - split RPE modulation
-        positive_rpe = torch.clamp(advantage, min=0.0) * alpha_plus
-        negative_rpe = torch.clamp(advantage, max=0.0) * alpha_minus
 
-        modulated_advantage = positive_rpe + negative_rpe
+        act_positive_rpe = torch.clamp(norm_adv, min=0.0) * alpha_plus
+        act_negative_rpe = torch.clamp(norm_adv, max=0.0) * alpha_minus
+        actor_advantage = act_positive_rpe + act_negative_rpe
 
-        actor_loss = -(log_probs * modulated_advantage).mean() # Policy gradient loss (encourage actions that had positive advantage)
-        critic_target = values.detach() + modulated_advantage
+        actor_loss = -(log_probs * actor_advantage).mean()
+
         
-        critic_loss = F.mse_loss(values, critic_target) # Critic loss (fit value estimates to the computed returns)
-        entropy = dist.entropy().mean() # Entropy bonus (encourage exploration)
+        crit_positive_rpe = torch.clamp(advantage, min=0.0) * alpha_plus
+        crit_negative_rpe = torch.clamp(advantage, max=0.0) * alpha_minus
+        critic_target = values.detach() + crit_positive_rpe + crit_negative_rpe
+        
+        critic_loss = F.mse_loss(values, critic_target) 
+        entropy = dist.entropy().mean() 
 
         total_loss = actor_loss + critic_coef * critic_loss - entropy_coef * entropy
 

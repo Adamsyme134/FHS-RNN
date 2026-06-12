@@ -1,6 +1,6 @@
 {
-    "run_id": "run_20260611_104801_0766e",
-    "timestamp": "20260611_104801",
+    "run_id": "run_20260611_151029_dd0ee",
+    "timestamp": "20260611_151029",
     "lr": 0.001,
     "epochs": 400,
     "batches_per_epoch": 50,

@@ -212,12 +212,12 @@ def run_variance_timeline_experiment(num_runs=5, condition_name="Healthy_Baselin
     print(f"Variance plotting complete. Saved to {run_dir}\n")
 
 if __name__ == "__main__":
-    test_decoder_architectures("checkpoints/weights_baseline.pth", model_type="rl")
+    #test_decoder_architectures("checkpoints/weights_baseline.pth", model_type="rl")
     # 1. Overlay
     #run_phenotype_overlays()
     
     # 2. SE / Variance tracking (Example: test L-DOPA with 5 seeds)
-    #run_variance_timeline_experiment(num_runs=5, condition_name="PD_LDOPA")
+    run_variance_timeline_experiment(num_runs=5, condition_name="PD_Untreated")
 # if __name__ == "__main__":
     #choice = input("Run variance experiment for SL or RL? (sl/rl): ").lower()
     #run_variance_experiment(num_runs=5, model_type=choice)

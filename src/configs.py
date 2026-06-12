@@ -22,10 +22,10 @@ MODEL = {
 
 TRAINING = {
     "lr": 1e-3,
-    "epochs": 400,#500,
+    "epochs": 500,#500,
     "batches_per_epoch": 50,
     "batch_size": 32,
-    "reversal_epoch":200,#300\
+    "reversal_epoch":250,#300\
     "gamma":0.99,
     "phenotypes": {
     "Healthy_Baseline": {"alpha_plus": 1.0, "alpha_minus": 1.0},

@@ -16,6 +16,49 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from scipy.ndimage import gaussian_filter1d
 
+@torch.jit.script
+def evaluate_chunk_fast(
+    actions: torch.Tensor,
+    windows: torch.Tensor,
+    is_rewarded: torch.Tensor,
+    prev_windows: torch.Tensor,
+    reward_consumed: torch.Tensor,
+    lick_cost: float,
+    reward_value: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    
+    batch_size, chunk_len = actions.size()
+    rewards = torch.zeros((batch_size, chunk_len), device=actions.device)
+    
+    # This loop gets compiled down to C++, making it effectively instantaneous 
+    for i in range(chunk_len):
+        curr_window = windows[:, i]
+        
+        # 1. Reset consumed flag if we stepped OUT of a reward window
+        stepped_out = (~curr_window) & prev_windows
+        reward_consumed = reward_consumed & (~stepped_out)
+        
+        # Shift the previous window forward for the next timestep
+        prev_windows = curr_window
+        
+        # 2. Masks
+        licked = (actions[:, i] == 1)
+        trial_reward = is_rewarded[:, i]
+        
+        # 3. Calculate Valid Rewards (Licked + In Window + Has Reward + Not Consumed)
+        valid_reward_mask = licked & curr_window & trial_reward & (~reward_consumed)
+        
+        # 4. Calculate Penalties (Licked + (Not In Window OR No Reward))
+        penalty_mask = licked & (~curr_window | (curr_window & ~trial_reward))
+        
+        # 5. Apply Values (Mutually exclusive masks allow us to do this cleanly without torch.where)
+        rewards[:, i] = valid_reward_mask.to(torch.float32) * reward_value + penalty_mask.to(torch.float32) * lick_cost
+        
+        # Consume the reward for the batch indices that got a valid reward
+        reward_consumed = reward_consumed | valid_reward_mask
+
+    return rewards, reward_consumed
+
 def parse_duration(duration_config):
     if isinstance(duration_config, (list, tuple)):
         return np.random.randint(duration_config[0], duration_config[1] + 1)
@@ -360,35 +403,25 @@ class ContinuousRLTask():
         self.reward_consumed = torch.zeros((self.batch_size), dtype=torch.bool) # To track if reward has been consumed in each trial
     
     def evaluate_chunk(self, t_start, t_end, actions):
-        chunk_len = t_end - t_start
-        rewards = torch.zeros((self.batch_size, chunk_len), device=actions.device)
-        
         # Pre-slice the tracking tensors for this chunk
         windows = self.reward_windows[:, t_start:t_end]
         is_rewarded = self.trial_is_rewarded[:, t_start:t_end]
-
-        for i in range(chunk_len):
-            t = t_start + i
+        
+        # Get the window state from the timestep right before this chunk (to handle boundary logic)
+        if t_start > 0:
+            prev_windows = self.reward_windows[:, t_start - 1]
+        else:
+            prev_windows = torch.zeros(self.batch_size, dtype=torch.bool, device=actions.device)
             
-            # 1. Reset consumed flag if we stepped OUT of a reward window
-            if t > 0:
-                stepped_out = (~self.reward_windows[:, t]) & self.reward_windows[:, t-1]
-                self.reward_consumed[stepped_out] = False
-                
-            # 2. Masks for the current timestep
-            licked = (actions[:, i] == 1)
-            in_window = windows[:, i]
-            trial_rewarded = is_rewarded[:, i]
-            
-            # 3. Calculate Valid Rewards
-            # (Licked AND In Window AND Trial has Reward AND Not Yet Consumed)
-            valid_reward_mask = licked & in_window & trial_rewarded & (~self.reward_consumed)
-            rewards[valid_reward_mask, i] = self.reward_value
-            self.reward_consumed[valid_reward_mask] = True # Consume it for these specific batch indices
-            
-            # 4. Calculate Penalties
-            # (Licked AND (Not In Window OR (In Window BUT No Reward)))
-            penalty_mask = licked & (~in_window | (in_window & ~trial_rewarded))
-            rewards[penalty_mask, i] = self.lick_cost
-            
+        # Fire the C++ compiled kernel
+        rewards, self.reward_consumed = evaluate_chunk_fast(
+            actions, 
+            windows, 
+            is_rewarded, 
+            prev_windows, 
+            self.reward_consumed, 
+            self.lick_cost, 
+            self.reward_value
+        )
+        
         return rewards
