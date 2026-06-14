@@ -36,6 +36,82 @@ class PlotConfig:
     fps: int = 10
 
 #----- SPECIFIC PLOTS ----
+def plot_scorecard_metrics(csv_path="results/scorecards/robust_phenotype_breakage_metrics.csv"):
+    df = pd.read_csv(csv_path)
+    phenotypes = df['Phenotype'].tolist()
+    
+    # Standardizing colors across the plots
+    colors = ['#2ca02c', '#1f77b4', '#d62728'] # Green, Blue, Red
+    
+    # Grouping the metrics by their domain to handle the different Y-axis scales
+    metric_groups = [
+        {
+            "title": "Behavioral Policies (Action Gaps)",
+            "ylabel": "Action Gap (Actor A - Actor C)",
+            "metrics": [
+                ('Pre_Action_Gap_(A-C)_Mean', 'Pre_Action_Gap_(A-C)_SE', 'Pre-Reversal\n(Rule Acquisition)'),
+                ('Post_Action_Gap_(A-C)_Mean', 'Post_Action_Gap_(A-C)_SE', 'Post-Reversal\n(Cognitive Flexibility)')
+            ]
+        },
+        {
+            "title": "Valuation & Hallucinations (Critic)",
+            "ylabel": "Predicted Expected Value",
+            "metrics": [
+                ('Pre_Critic_Value_C_Mean', 'Pre_Critic_Value_C_SE', 'Pre-Reversal Critic C\n(Early Hallucination)'),
+                ('Post_Critic_Value_A_Mean', 'Post_Critic_Value_A_SE', 'Post-Reversal Critic A\n(Perseveration)')
+            ]
+        },
+        {
+            "title": "Internal Geometry",
+            "ylabel": "Euclidean Distance",
+            "metrics": [
+                ('Post_Rep_Distance_A_C_Mean', 'Post_Rep_Distance_A_C_SE', 'Representational Distance\n(A vs. C)')
+            ]
+        }
+    ]
+
+    # Create a 1x3 grid of subplots
+    fig, axes = plt.subplots(1, 3, figsize=(16, 6))
+    
+    for ax_idx, group in enumerate(metric_groups):
+        ax = axes[ax_idx]
+        metrics = group["metrics"]
+        x = np.arange(len(metrics))
+        width = 0.25
+        
+        for i, phenotype in enumerate(phenotypes):
+            pheno_data = df[df['Phenotype'] == phenotype].iloc[0]
+            
+            means = [pheno_data[m[0]] for m in metrics]
+            errors = [pheno_data[m[1]] for m in metrics]
+            
+            # Offset each bar so they group together side-by-side
+            bar_positions = x + (i - 1) * width
+            
+            ax.bar(bar_positions, means, width, yerr=errors, label=phenotype.replace('_', ' '), 
+                   color=colors[i], capsize=5, alpha=0.8, edgecolor='black')
+
+        # Formatting each specific subplot
+        ax.axhline(0, color='black', linewidth=1)
+        ax.set_ylabel(group["ylabel"])
+        ax.set_title(group["title"], pad=15, fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels([m[2] for m in metrics])
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+        
+        # Only place the legend on the first plot to avoid cluttering the figure
+        if ax_idx == 0: 
+            ax.legend(loc='upper right')
+
+    plt.tight_layout()
+    
+    # Save and display
+    save_dir = Path("results/scorecards")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_dir / "full_phenotype_dashboard.png", dpi=300, bbox_inches='tight')
+    print("Saved chart to results/scorecards/full_phenotype_dashboard.png")
+    plt.show()
+
 def plot_task_batch():
     padded_inputs, padded_targets, lengths, mask, cues = generate_batch(batch_size=5)
     print(padded_inputs, padded_targets, lengths, mask)
@@ -1623,4 +1699,5 @@ if __name__ == "__main__":
     current_run_dir = initialize_run_directory() if save == "y" else None
     
     # Run the setup cleanly using the choice string
-    plot_all_graphs(train=True, model_type=model_choice, plots=["timeline","baseline","final_reversal","decoding"], run_dir=current_run_dir,condition="Healthy_Baseline")
+    plot_scorecard_metrics()
+    #plot_all_graphs(train=True, model_type=model_choice, plots=["timeline","baseline","final_reversal","decoding"], run_dir=current_run_dir,condition="Healthy_Baseline")

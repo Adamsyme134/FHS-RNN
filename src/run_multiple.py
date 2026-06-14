@@ -5,9 +5,10 @@ import torch
 import time
 import matplotlib.pyplot as plt
 import random
+import pandas as pd
 import numpy as np
 import scipy.stats as stats
-from evaluate import train_continuous_decoders
+from evaluate import train_continuous_decoders, calculate_phenotype_metrics
 from configs import TASK, TRAINING
 from task import generate_full_dataset
 from models import ScratchRNN, RLModelWrapper, ActorCriticRNN
@@ -117,6 +118,81 @@ def run_phenotype_overlays():
     plot_phenotype_overlay_timeline(actor_data, TRAINING["reversal_epoch"], metric_name="Actor Lick Probability", run_dir=run_dir)
     print("Overlay plotting complete.\n")
 
+def run_phenotype_scorecard(epochs=400, num_seeds=5):
+    """Trains all phenotypes across multiple seeds and generates a robust quantitative breakage scorecard."""
+    print("\n" + "="*80)
+    print(f" STARTING ROBUST PHENOTYPE SWEEP ({num_seeds} Seeds/Condition)")
+    print("="*80)
+    
+    scorecard = []
+    virtual_epoch_length = 1000
+    total_time = epochs * virtual_epoch_length
+    
+    for condition_name, params in TRAINING["phenotypes"].items():
+        print(f"\n--- Simulating {condition_name} ---")
+        
+        # Accumulators for this condition's metrics
+        condition_metrics = {
+        }
+        
+        for seed in range(42, 42 + num_seeds):
+            print(f"  > Training Seed {seed}...")
+            set_global_seed(seed)
+            
+            # Train the model specific to this phenotype and seed
+            rnn, _, live_critic, live_actor = train_rl_model(
+                total_timesteps=total_time,
+                bptt_horizon=TRAINING.get("bptt_horizon", 60),
+                batch_size=TRAINING["batch_size"],
+                lr=TRAINING["lr"],
+                alpha_plus=params["alpha_plus"],
+                alpha_minus=params["alpha_minus"],
+                save_dir=f"checkpoints/scorecard_{condition_name}_seed_{seed}",
+                gamma=TRAINING["gamma"]
+            )
+            
+            wrapped_model = RLModelWrapper(rnn)
+            
+            # Calculate metrics for this specific seed
+            seed_metrics = calculate_phenotype_metrics(wrapped_model, live_critic, live_actor, TASK)
+            
+            if not condition_metrics:
+                condition_metrics = {key: [] for key in seed_metrics.keys()}
+                
+            # Store the metrics
+            for key in condition_metrics.keys():
+                condition_metrics[key].append(seed_metrics[key])
+                
+        # Calculate Mean and Standard Error for the entire condition
+        avg_metrics = {'Phenotype': condition_name}
+        for key, values in condition_metrics.items():
+            avg_metrics[f"{key}_Mean"] = np.mean(values)
+            avg_metrics[f"{key}_SE"] = stats.sem(values)
+            
+        scorecard.append(avg_metrics)
+        
+    # Format and print the results
+    df = pd.DataFrame(scorecard)
+    df = df.set_index('Phenotype')
+    
+    # Reorder columns so Means and SEs are next to each other
+    ordered_cols = []
+    for key in condition_metrics.keys():
+        ordered_cols.extend([f"{key}_Mean", f"{key}_SE"])
+    df = df[ordered_cols]
+    
+    print("\n\n" + "="*100)
+    print(f" FINAL ROBUST PHENOTYPE SCORECARD (n={num_seeds} per condition)")
+    print("="*100)
+    print(df.to_markdown(floatfmt=".4f"))
+    print("="*100 + "\n")
+    
+    # Save to CSV
+    run_dir = Path("./results/scorecards")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    df.to_csv(run_dir / "robust_phenotype_breakage_metrics.csv")
+    return df
+
 def test_decoder_architectures(checkpoint_path, model_type="sl"):
     # Load your trained network
     if model_type == "sl":
@@ -217,7 +293,7 @@ if __name__ == "__main__":
     #run_phenotype_overlays()
     
     # 2. SE / Variance tracking (Example: test L-DOPA with 5 seeds)
-    run_variance_timeline_experiment(num_runs=5, condition_name="PD_Untreated")
-# if __name__ == "__main__":
-    #choice = input("Run variance experiment for SL or RL? (sl/rl): ").lower()
-    #run_variance_experiment(num_runs=5, model_type=choice)
+    #run_variance_timeline_experiment(num_runs=5, condition_name="PD_Untreated")
+
+    #3. Scorecards
+    run_phenotype_scorecard(epochs=400, num_seeds=5)

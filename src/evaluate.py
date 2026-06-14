@@ -426,3 +426,55 @@ def align_trials(
         aligned_data[i] = aligned[:T_total]
         
     return aligned_data if is_3d else aligned_data.squeeze()
+
+def calculate_phenotype_metrics(model, live_critic, live_actor, trial_params):
+    """Calculates quantitative 'breakage' metrics for Pre-Reversal and Post-Reversal phases."""
+    metrics = {}
+    
+    reversal_epoch = TRAINING.get("reversal_epoch", 200)
+    
+    # ==========================================
+    # 1. PRE-REVERSAL METRICS (Acquisition)
+    # A is 100%, C is 0%
+    # ==========================================
+    pre_start = reversal_epoch - 20
+    pre_end = reversal_epoch
+    
+    pre_actor_A = np.mean(live_actor['A'][pre_start:pre_end])
+    pre_actor_C = np.mean(live_actor['C'][pre_start:pre_end])
+    # Healthy: High positive number (prefers A)
+    metrics['Pre_Action_Gap_(A-C)'] = pre_actor_A - pre_actor_C 
+    
+    # Healthy: ~0.0 (knows C is worthless)
+    metrics['Pre_Critic_Value_C'] = np.mean(live_critic['C'][pre_start:pre_end])
+    
+    # ==========================================
+    # 2. POST-REVERSAL METRICS (Cognitive Flexibility)
+    # A is 0%, C is 100%
+    # ==========================================
+    post_actor_A = np.mean(live_actor['A'][-20:])
+    post_actor_C = np.mean(live_actor['C'][-20:])
+    # Healthy: High negative number (prefers C)
+    metrics['Post_Action_Gap_(A-C)'] = post_actor_A - post_actor_C
+    
+    # Healthy: ~0.0 (knows A is now worthless)
+    # L-DOPA: Will likely hallucinate value here due to perseveration
+    metrics['Post_Critic_Value_A'] = np.mean(live_critic['A'][-20:]) 
+    
+    # ==========================================
+    # 3. REPRESENTATIONAL GEOMETRY (Post-Reversal)
+    # ==========================================
+    hs, cues, lengths, _, _, _ = extract_hidden_states_rl(model, trial_params, num_trials_per_stim=50, is_reversed=True)
+    hs_np = hs.cpu().detach().numpy()
+    
+    snapshots = {'A': [], 'B': [], 'C': []} 
+    for i in range(hs_np.shape[0]):
+        trial_len = lengths[i].item()
+        anticipation_timestep = max(0, trial_len - 6) 
+        snapshots[cues[i]].append(hs_np[i, anticipation_timestep, :])
+        
+    centroid_A = np.mean(snapshots['A'], axis=0)
+    centroid_C = np.mean(snapshots['C'], axis=0)
+    metrics['Post_Rep_Distance_A_C'] = np.linalg.norm(centroid_A - centroid_C)
+    
+    return metrics

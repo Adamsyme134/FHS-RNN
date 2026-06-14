@@ -9,3 +9,5 @@ jupyter
 ipykernel
 pytest
 ffmpeg
+tabulate
+seaborn
