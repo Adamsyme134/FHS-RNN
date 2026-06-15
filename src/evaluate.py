@@ -280,11 +280,14 @@ def train_stimulus_decoders(model, trial_params, reversed=False, noise_stdev=0.1
 
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     per_stimulus_accuracies = {'A': [], 'B': [], 'C': []}
+    per_stimulus_std = {'A': [], 'B': [], 'C': []}
     avg_accuracy = []
+    avg_std = []
     
     for t in range(T_total):
         X_t = aligned_hs[:, t, :]
         fold_A, fold_B, fold_C = [], [], []
+        fold_avgs = []
         
         for train_idx, test_idx in cv.split(X_t, y_all_1d):
             X_train, X_test = X_t[train_idx], X_t[test_idx]
@@ -299,13 +302,19 @@ def train_stimulus_decoders(model, trial_params, reversed=False, noise_stdev=0.1
             fold_A.append(class_accs[0])
             fold_B.append(class_accs[1])
             fold_C.append(class_accs[2])    
+            fold_avgs.append(np.mean(class_accs))
             
         per_stimulus_accuracies['A'].append(np.mean(fold_A))
         per_stimulus_accuracies['B'].append(np.mean(fold_B))
         per_stimulus_accuracies['C'].append(np.mean(fold_C))
-        avg_accuracy.append((np.mean(fold_A) + np.mean(fold_B) + np.mean(fold_C)) / 3)
+        avg_accuracy.append(np.mean(fold_avgs))
+
+        per_stimulus_std['A'].append(np.std(fold_A))
+        per_stimulus_std['B'].append(np.std(fold_B))
+        per_stimulus_std['C'].append(np.std(fold_C))
+        avg_std.append(np.std(fold_avgs))
     
-    return per_stimulus_accuracies, avg_accuracy, 3, T_stim, T_delay, T_rew, 15
+    return per_stimulus_accuracies,per_stimulus_std, avg_accuracy,avg_std, 3, T_stim, T_delay, T_rew, 15
 
 def train_continuous_decoders(model, trial_params, reversed=False, noise_stdev=0.1, model_type="sl", decoder_type="ridge"):
     if model_type == "rl":

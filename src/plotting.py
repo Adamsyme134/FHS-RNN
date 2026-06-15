@@ -1074,16 +1074,28 @@ def plot_variance_batch_timeline(summary_stats, reversal_epoch, metric_name="Pre
         plt.show()
 
 
-def plot_decoding_stimulus(accuracies_dict, avg_accuracy, T_pre, T_stim, T_delay, T_rew, T_post, reversed=False, run_dir=None):
+def plot_decoding_stimulus(accuracies_dict, std_dict, avg_accuracy, avg_std, T_pre, T_stim, T_delay, T_rew, T_post, reversed=False, run_dir=None):
     plt.figure(figsize=(8, 5))
     colors = {'A': 'crimson', 'B': 'forestgreen', 'C': 'royalblue'}
     
     for cue, acc_list in accuracies_dict.items():
         times = np.arange(len(acc_list))
-        plt.plot(times, acc_list, marker='o', markersize=4, linewidth=2, label=f'Stimulus {cue}', color=colors.get(cue, 'black'))
+        mean_arr = np.array(acc_list)
+        std_arr = np.array(std_dict[cue])
         
+        plt.plot(times, mean_arr, marker='o', markersize=4, linewidth=2, label=f'Stimulus {cue}', color=colors.get(cue, 'black'))
+        # Fill between Mean - SD and Mean + SD
+        plt.fill_between(times, np.clip(mean_arr - std_arr, 0, 1), np.clip(mean_arr + std_arr, 0, 1), 
+                         color=colors.get(cue, 'black'), alpha=0.15)
+    
     times = np.arange(len(avg_accuracy))
+    avg_arr = np.array(avg_accuracy)
+    avg_std_arr = np.array(avg_std)
+
     plt.plot(times, avg_accuracy, alpha=0.4, marker='o', markersize=2, linewidth=2, label='Avg accuracy', color="black", linestyle='--')
+    plt.fill_between(times, np.clip(avg_arr - avg_std_arr, 0, 1), np.clip(avg_arr + avg_std_arr, 0, 1), 
+                     color="black", alpha=0.1)
+    
     plt.axhline(y=1/3, color='gray', linestyle='--', label='Chance (33%)')
 
     add_phase_boundaries(T_pre, T_stim, T_delay, T_rew)
@@ -1158,8 +1170,8 @@ def run_decoding_analysis(model, trial_params, run_dir, baseline_ckpt="checkpoin
     print("--- Starting Pre-Reversal Decoding Analysis ---")
     model.load_state_dict(torch.load(baseline_ckpt))
 
-    acc_dict, avg_acc, T_pre, T_stim, T_delay, T_rew, T_post = train_stimulus_decoders(model, trial_params, reversed=False, model_type=model_type)
-    plot_decoding_stimulus(acc_dict, avg_acc, T_pre, T_stim, T_delay, T_rew, T_post, reversed=False, run_dir=run_dir)
+    acc_dict, std_dict, avg_acc, avg_std, T_pre, T_stim, T_delay, T_rew, T_post = train_stimulus_decoders(model, trial_params, reversed=False, model_type=model_type)
+    plot_decoding_stimulus(acc_dict, std_dict, avg_acc, avg_std, T_pre, T_stim, T_delay, T_rew, T_post, reversed=False, run_dir=run_dir)
 
     mean_preds, _, _, _, _, _ = train_continuous_decoders(model, trial_params, reversed=False, model_type=model_type)
     plot_decoding_trajectories(mean_preds, T_pre, T_stim, T_delay, T_rew, T_post, reversed=False, run_dir=run_dir)
@@ -1170,8 +1182,8 @@ def run_decoding_analysis(model, trial_params, run_dir, baseline_ckpt="checkpoin
     print("--- Starting Post-Reversal Decoding Analysis ---")
     model.load_state_dict(torch.load(reversal_ckpt))
     
-    acc_dict, avg_acc, T_pre, T_stim, T_delay, T_rew, T_post = train_stimulus_decoders(model, trial_params, reversed=True, model_type=model_type)
-    plot_decoding_stimulus(acc_dict, avg_acc, T_pre, T_stim, T_delay, T_rew, T_post, reversed=True, run_dir=run_dir)
+    acc_dict, std_dict, avg_acc, avg_std, T_pre, T_stim, T_delay, T_rew, T_post = train_stimulus_decoders(model, trial_params, reversed=True, model_type=model_type)
+    plot_decoding_stimulus(acc_dict, std_dict, avg_acc, avg_std, T_pre, T_stim, T_delay, T_rew, T_post, reversed=True, run_dir=run_dir)
 
     mean_preds, _, _, _, _, _ = train_continuous_decoders(model, trial_params, reversed=True, model_type=model_type)
     plot_decoding_trajectories(mean_preds, T_pre, T_stim, T_delay, T_rew, T_post, reversed=True, run_dir=run_dir)
@@ -1396,7 +1408,9 @@ def run_cross_projection_pca(
         custom_title="Joint PCA Projection (Baseline + Reversal Overlay)"
     )
 
-def run_aligned_decoding_distance_experiment(reward_percentages=[0.0, 0.25, 0.5, 0.75, 1.0], epochs=80, run_dir=None):
+def run_aligned_decoding_distance_experiment(
+        reward_percentages=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0], 
+        epochs=80, run_dir=None):
     # Setup fixed alignment parameters for the plot
     T_pre = 5
     T_stim = TASK["stimulus_duration"]
@@ -1685,7 +1699,6 @@ def plot_all_graphs(train=False, model_type="sl", plots=None, run_dir=None, cond
             run_decoding_analysis(model=my_wrapped_model, trial_params=TASK, run_dir=run_dir)
     if "reward_percentage" in plots:
         run_aligned_decoding_distance_experiment(
-            reward_percentages=[0.0, 0.25, 0.5, 0.75, 1.0], 
             epochs=80, 
             run_dir=run_dir
         )
@@ -1699,5 +1712,5 @@ if __name__ == "__main__":
     current_run_dir = initialize_run_directory() if save == "y" else None
     
     # Run the setup cleanly using the choice string
-    plot_scorecard_metrics()
-    #plot_all_graphs(train=True, model_type=model_choice, plots=["timeline","baseline","final_reversal","decoding"], run_dir=current_run_dir,condition="Healthy_Baseline")
+    #plot_scorecard_metrics()
+    plot_all_graphs(train=True, model_type=model_choice, plots=["reward_percentage"], run_dir=current_run_dir,condition="Healthy_Baseline")

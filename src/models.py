@@ -209,8 +209,16 @@ class RLModelWrapper(nn.Module):
         return ys, hs
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
-        return self.rl_model.load_state_dict(state_dict, strict=strict, assign=assign)
-
+        # Strip the PyTorch 2.0 compilation prefix so we can load compiled weights into an uncompiled model
+        clean_state_dict = {}
+        for key, value in state_dict.items():
+            if key.startswith("_orig_mod."):
+                clean_key = key.replace("_orig_mod.", "")
+                clean_state_dict[clean_key] = value
+            else:
+                clean_state_dict[key] = value
+                
+        return self.rl_model.load_state_dict(clean_state_dict, strict=strict, assign=assign)
     def eval(self):
         self.rl_model.eval()
 
